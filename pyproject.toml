@@ -25,7 +25,6 @@ dependencies = [
     "bleach",
     "bottle",
     "dataclasses-json",
-    "deepdiff",
     "Levenshtein",
     "peewee",
     "pychromecast",

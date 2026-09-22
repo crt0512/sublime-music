@@ -30,7 +30,6 @@
             bleach
             bottle
             dataclasses-json
-            deepdiff
             keyring
             mpv
             peewee

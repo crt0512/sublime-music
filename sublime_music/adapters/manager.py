@@ -63,6 +63,43 @@ if delay_str := os.environ.get("DOWNLOAD_BLOCK_DELAY"):
 T = TypeVar("T")
 
 
+# Request timeout in seconds
+DOWNLOAD_WAIT_TIMEOUT = 600
+
+
+class DownloadError(Exception):
+    """
+    A download request was answered with an error document instead of the file.
+
+    :param not_found: whether the server said that the resource does not exist (as
+        opposed to a transient failure), in which case asking again is pointless.
+    """
+
+    def __init__(self, message: str, not_found: bool = False):
+        super().__init__(message)
+        self.not_found = not_found
+
+
+def _describe_error_document(document: Any) -> Tuple[str, bool]:
+    """
+    Describes a JSON document which a server returned instead of a file.
+
+    >>> _describe_error_document(
+    ...     {"subsonic-response": {"error": {"code": 70, "message": "no cover found"}}}
+    ... )
+    ('server error 70: no cover found', True)
+    >>> _describe_error_document({"unexpected": "document"})
+    ("unexpected JSON response: {'unexpected': 'document'}", False)
+    """
+    try:
+        error = document["subsonic-response"]["error"]
+        code = error.get("code")
+    except (KeyError, TypeError, AttributeError):
+        return f"unexpected JSON response: {str(document)[:200]}", False
+    # Subsonic error code 70 means "the requested data was not found".
+    return f"server error {code}: {error.get('message')}", code == 70
+
+
 class Result(Generic[T]):
     """
     A result from a :class:`AdapterManager` function. This is effectively a wrapper
@@ -107,11 +144,12 @@ class Result(Generic[T]):
     def _on_future_complete(self, future: Future):
         try:
             self._data = future.result()
-        except Exception as e:
+        except Exception:
+            # The exception stays on the future: ``result()`` raises it and
+            # ``exception()`` returns it. Re-raising it here would only make the executor
+            # log a traceback for every failed request.
             if self._default_value:
                 self._data = self._default_value
-            else:
-                raise e
 
     def result(self) -> T:
         """
@@ -131,10 +169,20 @@ class Result(Generic[T]):
             else:
                 raise e
 
+    def exception(self) -> Optional[BaseException]:
+        """The exception raised while resolving the data, if any."""
+        if self._future is None or not self._future.done() or self._future.cancelled():
+            return None
+        return self._future.exception()
+
     def add_done_callback(self, fn: Callable, *args):
-        """Attaches the callable ``fn`` to the future."""
+        """
+        Attaches the callable ``fn`` to the future. ``fn`` is always called with this
+        :class:`Result` (never with the underlying future), so it can use :meth:`result`,
+        which honours the default value, and :meth:`exception`.
+        """
         if self._future is not None:
-            self._future.add_done_callback(fn, *args)
+            self._future.add_done_callback(lambda _: fn(self, *args))
         else:
             # Run the function immediately if it's not a future.
             fn(self, *args)
@@ -185,6 +233,8 @@ class DownloadProgress:
 class AdapterManager:
     available_adapters: Set[Any] = {FilesystemAdapter, SubsonicAdapter}
     current_download_ids: Set[str] = set()
+    # Downloads in progress, keyed by their temporary file name (a hash of the URI).
+    _in_progress_downloads: Set[str] = set()
     download_set_lock = threading.Lock()
     executor: ThreadPoolExecutor = ThreadPoolExecutor()
     download_executor: ThreadPoolExecutor = ThreadPoolExecutor()
@@ -193,6 +243,8 @@ class AdapterManager:
 
     _song_download_jobs: Dict[str, Result[str]] = {}
     _cancelled_song_ids: Set[str] = set()
+    # Cover art IDs which the server said it has no image for (until the next reset).
+    _missing_cover_art_ids: Set[str] = set()
 
     @dataclass
     class _AdapterManagerInternal:
@@ -267,6 +319,14 @@ class AdapterManager:
         # First, shutdown the current one...
         if AdapterManager._instance:
             AdapterManager._instance.shutdown()
+
+        if AdapterManager.is_shutting_down:
+            # ``shutdown()`` stopped the executors; a reset manager needs working ones.
+            AdapterManager.executor = ThreadPoolExecutor()
+            AdapterManager.download_executor = ThreadPoolExecutor()
+            AdapterManager.is_shutting_down = False
+
+        AdapterManager._missing_cover_art_ids = set()
 
         AdapterManager._offline_mode = config.offline_mode
 
@@ -386,10 +446,15 @@ class AdapterManager:
                 hashlib.sha1(bytes(uri, "utf8")).hexdigest()
             )
 
+            # Downloads are deduplicated by URI rather than by ``id``: an ID is only unique
+            # within its kind of resource, and on some servers a song and its cover art
+            # share one. ``current_download_ids`` only reports which songs are downloading.
+            download_key = download_tmp_filename.name
             resource_downloading = False
             with AdapterManager.download_set_lock:
-                if id in AdapterManager.current_download_ids:
+                if download_key in AdapterManager._in_progress_downloads:
                     resource_downloading = True
+                AdapterManager._in_progress_downloads.add(download_key)
                 AdapterManager.current_download_ids.add(id)
 
             if before_download:
@@ -406,17 +471,26 @@ class AdapterManager:
                     ),
                 )
 
-            # TODO (#122): figure out how to retry if the other request failed.
             if resource_downloading:
                 logging.info(f"{uri} already being downloaded.")
 
                 # The resource is already being downloaded. Busy loop until it has
-                # completed. Then, just return the path to the resource.
+                # completed. Then, just return the path to the resource. The other
+                # download always releases the ID when it finishes (see the ``finally``
+                # below) and deletes its file if it failed, so the file only exists if
+                # the download succeeded.
                 t = 0.0
-                while id in AdapterManager.current_download_ids and t < 20:
+                while (
+                    download_key in AdapterManager._in_progress_downloads
+                    and t < DOWNLOAD_WAIT_TIMEOUT
+                ):
                     sleep(0.2)
                     t += 0.2
-                    # TODO (#122): handle the timeout
+
+                if download_key in AdapterManager._in_progress_downloads:
+                    raise Exception(f"Timed out waiting for {uri} to be downloaded.")
+                if not download_tmp_filename.exists():
+                    raise Exception(f"{uri} failed to download in another thread.")
             else:
                 logging.info(f"{uri} not found. Downloading...")
                 try:
@@ -433,7 +507,11 @@ class AdapterManager:
                     # should be more than enough for 1 KiB).
                     request = requests.get(uri, stream=True, timeout=(10, 5))
                     if "json" in request.headers.get("Content-Type", ""):
-                        raise Exception("Didn't expect JSON!")
+                        try:
+                            document = request.json()
+                        except ValueError:
+                            document = request.text
+                        raise DownloadError(*_describe_error_document(document))
 
                     total_size = int(request.headers.get("Content-Length", 0))
                     if expected_size_exists:
@@ -481,6 +559,9 @@ class AdapterManager:
                             DownloadProgress(DownloadProgress.Type.DONE),
                         )
                 except Exception as e:
+                    # Don't leave a partial file behind: other threads waiting on this
+                    # download use the file's existence to tell whether it succeeded.
+                    download_tmp_filename.unlink(missing_ok=True)
                     if expected_size_exists and not download_cancelled:
                         # Something failed. Post an error.
                         AdapterManager._instance.song_download_progress(
@@ -490,8 +571,9 @@ class AdapterManager:
                     # Re-raise the exception so that we can actually handle it.
                     raise
                 finally:
-                    # Always release the download set lock, even if there's an error.
+                    # Always release the download, even if there's an error.
                     with AdapterManager.download_set_lock:
+                        AdapterManager._in_progress_downloads.discard(download_key)
                         AdapterManager.current_download_ids.discard(id)
 
             logging.info(f"{uri} downloaded. Returning.")
@@ -517,6 +599,9 @@ class AdapterManager:
         def future_finished(f: Result):
             assert AdapterManager._instance
             assert AdapterManager._instance.caching_adapter
+            if (exception := f.exception()) is not None:
+                logging.info(f"Not caching {cache_key} for {param!r}: {exception}")
+                return
             AdapterManager._instance.caching_adapter.ingest_new_data(cache_key, param, f.result())
 
         return future_finished
@@ -825,6 +910,13 @@ class AdapterManager:
         if not AdapterManager._ground_truth_can_do("get_cover_art_uri") or not cover_art_id:
             return Result(existing_filename if scheme == "file" else "")
 
+        cover_art_id_str: str = cover_art_id
+        if force:
+            AdapterManager._missing_cover_art_ids.discard(cover_art_id_str)
+        elif cover_art_id_str in AdapterManager._missing_cover_art_ids:
+            # The server already told us that this cover art does not exist.
+            return Result(existing_filename if scheme == "file" else "")
+
         assert AdapterManager._instance
         supported_schemes = AdapterManager._instance.ground_truth_adapter.supported_schemes
 
@@ -875,6 +967,13 @@ class AdapterManager:
                 before_download,
                 default_value=existing_filename,
             )
+
+            def remember_if_missing(f: Result):
+                exception = f.exception()
+                if isinstance(exception, DownloadError) and exception.not_found:
+                    AdapterManager._missing_cover_art_ids.add(cover_art_id_str)
+
+            future.add_done_callback(remember_if_missing)
 
             if AdapterManager._instance.caching_adapter:
                 future.add_done_callback(
@@ -995,11 +1094,14 @@ class AdapterManager:
                     AdapterManager._instance.download_limiter_semaphore.release()
 
                     try:
-                        AdapterManager._instance.caching_adapter.ingest_new_data(
-                            CachingAdapter.CachedDataKey.SONG_FILE,
-                            song_id,
-                            (None, f.result(), None),
-                        )
+                        if (exception := f.exception()) is not None:
+                            logging.warning(f"Not caching song {song_id}: {exception}")
+                        else:
+                            AdapterManager._instance.caching_adapter.ingest_new_data(
+                                CachingAdapter.CachedDataKey.SONG_FILE,
+                                song_id,
+                                (None, f.result(), None),
+                            )
                     finally:
                         if AdapterManager._song_download_jobs.get(song_id):
                             del AdapterManager._song_download_jobs[song_id]

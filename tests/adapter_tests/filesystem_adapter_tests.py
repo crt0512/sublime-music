@@ -15,7 +15,7 @@ from sublime_music.adapters import (
     api_objects as SublimeAPI,
 )
 from sublime_music.adapters.filesystem import FilesystemAdapter
-from sublime_music.adapters.filesystem.models import Directory
+from sublime_music.adapters.filesystem.models import Artist, Directory
 from sublime_music.adapters.subsonic import api_objects as SubsonicAPI
 
 MOCK_DATA_FILES = Path(__file__).parent.joinpath("mock_data")
@@ -1044,3 +1044,52 @@ def test_search(cache_adapter: FilesystemAdapter):
     ]
     assert [a.name for a in search_result.artists] == ["foo", "better boo"]
     assert [a.name for a in search_result.albums] == ["Foo", "Boo"]
+
+
+def test_caching_get_artists_keeps_artists_referenced_by_songs(cache_adapter: FilesystemAdapter):
+    # Song 1 refers to artist "art2", which is not part of the artist index (servers which
+    # only index album artists never list track artists).
+    cache_adapter.ingest_new_data(KEYS.SONG, "1", MOCK_SUBSONIC_SONGS[1])
+    cache_adapter.ingest_new_data(
+        KEYS.ARTISTS,
+        None,
+        [
+            SubsonicAPI.ArtistAndArtistInfo(id="1", name="test1", album_count=3),
+            SubsonicAPI.ArtistAndArtistInfo(id="2", name="test2", album_count=4),
+        ],
+    )
+    cache_adapter.ingest_new_data(
+        KEYS.ARTISTS,
+        None,
+        [SubsonicAPI.ArtistAndArtistInfo(id="1", name="test1", album_count=3)],
+    )
+
+    # Artist 2 is unreferenced, so it is gone. Artist "art2" is still needed by song 1.
+    assert {a.id for a in cache_adapter.get_artists()} == {"1", "art2"}
+    song = cache_adapter.get_song_details("1")
+    assert song.artist is not None
+    assert (song.artist.id, song.artist.name) == ("art2", "foo")
+
+
+def test_song_with_missing_artist_row_has_no_artist(cache_adapter: FilesystemAdapter):
+    cache_adapter.ingest_new_data(KEYS.SONG, "1", MOCK_SUBSONIC_SONGS[1])
+    Artist.delete().where(Artist.id == "art2").execute()
+
+    # A dangling reference must read as "no artist", not raise.
+    song = cache_adapter.get_song_details("1")
+    assert song.artist is None
+    assert song.album is not None
+    assert (song.album.id, song.album.name) == ("a1", "foo")
+
+
+def test_stale_parent_sentinel_is_migrated(tmp_path: Path):
+    first = FilesystemAdapter({}, tmp_path, is_cache=True)
+    Directory.create(id="al-1", name=".", parent_id="-1")
+    Directory.create(id="al-2", name="music", parent_id="al-1")
+    first.shutdown()
+
+    # Opening the cache again migrates the "-1" parent that older versions cached.
+    second = FilesystemAdapter({}, tmp_path, is_cache=True)
+    assert Directory.get_by_id("al-1").parent_id == "root"
+    assert Directory.get_by_id("al-2").parent_id == "al-1"
+    second.shutdown()

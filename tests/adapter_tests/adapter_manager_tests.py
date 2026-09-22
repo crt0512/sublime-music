@@ -1,3 +1,5 @@
+import hashlib
+import threading
 from pathlib import Path
 from time import sleep
 
@@ -105,6 +107,39 @@ def test_default_value():
     assert result.data_is_available
 
 
+def test_failed_result_without_default_value():
+    def resolve_fail() -> int:
+        sleep(0.1)
+        raise Exception("boom")
+
+    seen = []
+    result: Result[int] = Result(resolve_fail)
+    result.add_done_callback(lambda f: seen.append(str(f.exception())))
+
+    with pytest.raises(Exception, match="boom"):
+        result.result()
+    assert seen == ["boom"]
+    assert not result.data_is_available
+
+
+def test_default_value_in_done_callback():
+    def resolve_fail() -> int:
+        sleep(0.1)
+        raise Exception("boom")
+
+    seen = []
+    result = Result(resolve_fail, default_value=42)
+    # The callback gets the Result, whose ``result()`` honours the default value.
+    result.add_done_callback(lambda f: seen.append((f.result(), str(f.exception()))))
+
+    t = 0.0
+    while not seen:
+        assert t < 1
+        t += 0.1
+        sleep(0.1)
+    assert seen == [(42, "boom")]
+
+
 def test_cancel():
     def resolve_later() -> int:
         sleep(0.1)
@@ -196,3 +231,47 @@ def test_search(adapter_manager: AdapterManager):
         sleep(0.1)
 
     assert len(results) == 1
+
+
+def _download_key(uri: str) -> str:
+    return hashlib.sha1(uri.encode("utf8")).hexdigest()
+
+
+def _download_result_waiting_on(uri: str, download_id: str) -> Result:
+    """Starts a download while another thread is (pretending to be) downloading it."""
+    with AdapterManager.download_set_lock:
+        AdapterManager._in_progress_downloads.add(_download_key(uri))
+    return AdapterManager._create_download_result(uri, download_id)
+
+
+def _finish_other_download(uri: str, succeeded: bool):
+    """Simulates the other thread finishing: writes the file on success, then releases."""
+    sleep(0.5)
+    if succeeded:
+        assert AdapterManager._instance
+        AdapterManager._instance.download_path.joinpath(_download_key(uri)).write_bytes(
+            b"song data"
+        )
+    with AdapterManager.download_set_lock:
+        AdapterManager._in_progress_downloads.discard(_download_key(uri))
+
+
+def test_download_waits_for_other_thread(adapter_manager: AdapterManager):
+    uri = "https://subsonic.example.com/rest/stream?id=1"
+    result = _download_result_waiting_on(uri, "song-1")
+    threading.Thread(target=_finish_other_download, args=(uri, True)).start()
+
+    assert Path(result.result()).read_bytes() == b"song data"
+    assert result.exception() is None
+
+
+def test_download_fails_when_other_thread_failed(adapter_manager: AdapterManager):
+    uri = "https://subsonic.example.com/rest/stream?id=2"
+    result = _download_result_waiting_on(uri, "song-2")
+    threading.Thread(target=_finish_other_download, args=(uri, False)).start()
+
+    # The other download failed, so there is no file: this must be an error too, not a
+    # path to a file that does not exist.
+    with pytest.raises(Exception, match="failed to download in another thread"):
+        result.result()
+    assert result.exception() is not None

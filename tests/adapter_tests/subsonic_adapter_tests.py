@@ -556,3 +556,11 @@ def test_search(adapter: SubsonicAdapter):
         assert len(search_results._songs) == 7
         assert len(search_results._artists) == 2
         assert len(search_results._albums) == 4
+
+
+def test_directory_parent_sentinel_means_root():
+    # gonic reports "-1" as the parent of its library root; a missing parent means "root".
+    assert SubsonicAPI.Directory.from_dict({"id": "al-1", "parent": "-1"}).parent_id == "root"
+    assert SubsonicAPI.Directory.from_dict({"id": "al-2"}).parent_id == "root"
+    assert SubsonicAPI.Directory.from_dict({"id": "al-3", "parent": "al-2"}).parent_id == "al-2"
+    assert SubsonicAPI.Directory.from_dict({"id": "root"}).parent_id is None

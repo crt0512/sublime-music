@@ -8,7 +8,7 @@ from ..adapters import AdapterManager, DownloadProgress, Result, api_objects as 
 from ..config import AppConfiguration, ProviderConfiguration
 from ..players import PlayerManager
 from ..ui import albums, artists, browse, player_controls, playlists, util
-from ..ui.common import IconButton, IconMenuButton, SpinnerImage
+from ..ui.common import DigitsEntry, IconButton, IconMenuButton, SpinnerImage
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -263,18 +263,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 elif descriptor == int:
                     int_editor_box = Gtk.Box()
 
-                    def restrict_to_ints(
-                        entry: Gtk.Entry, text: str, length: int, position: int
-                    ) -> bool:
-                        if self._updating_settings:
-                            return False
-                        if not text.isdigit():
-                            entry.emit_stop_by_name("insert-text")
-                            return True
-                        return False
-
-                    entry = Gtk.Entry(width_chars=8, text=option_value, sensitive=False)
-                    entry.connect("insert-text", restrict_to_ints)
+                    entry = DigitsEntry(width_chars=8, text=option_value, sensitive=False)
                     int_editor_box.add(entry)
 
                     buttons_box = Gtk.Box()

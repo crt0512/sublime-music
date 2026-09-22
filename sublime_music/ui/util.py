@@ -1,22 +1,12 @@
 import functools
-import re
 from datetime import timedelta
-from typing import Any, Callable, Iterable, List, Match, Optional, Tuple, Union, cast
+from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 
-from deepdiff import DeepDiff
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import Gdk, GLib, GObject, Gtk
 
 from ..adapters import AdapterManager, CacheMissError, Result, SongCacheStatus
 from ..adapters.api_objects import Playlist, Song
 from ..config import AppConfiguration
-
-deep_diff_exclude_regexp = [
-    re.compile(path)
-    for path in [
-        r"root\[\d+\]\.props",
-        r"root\[\d+\]\.g_type_instance",
-    ]
-]
 
 
 def format_song_duration(duration_secs: Union[int, timedelta, None]) -> str:
@@ -114,44 +104,43 @@ def get_cached_status_icons(song_ids: List[str]) -> List[str]:
     ]
 
 
-def _parse_diff_location(location: str) -> Tuple:
+def _model_values(model: Any) -> Any:
     """
-    Parses a diff location as returned by deepdiff.
+    Returns a value which can be used to compare ``model`` against another model.
 
-    >>> _parse_diff_location("root[22]")
-    ('22',)
-    >>> _parse_diff_location("root[22][4]")
-    ('22', '4')
-    >>> _parse_diff_location("root[22].foo")
-    ('22', 'foo')
+    GObjects are compared by the values of their GObject properties. Do not compare them
+    by introspecting their attributes (which is what ``deepdiff`` does): the type
+    metadata of a GObject (``g_type_instance``, ``props``, ...) forms a cyclic graph, and
+    PyGObject creates a new wrapper object on every access to it, which defeats cycle
+    detection and ends in a ``RecursionError``.
     """
-    match = re.match(r"root\[(\d*)\](?:\[(\d*)\]|\.(.*))?", location)
-    return tuple(g for g in cast(Match, match).groups() if g is not None)
+    if isinstance(model, GObject.Object):
+        return tuple(model.get_property(pspec.name) for pspec in model.list_properties())
+    return model
 
 
 def diff_song_store(store_to_edit: Any, new_store: Iterable[Any]):
     """
     Diffing song stores is nice, because we can easily make edits by modifying
     the underlying store.
+
+    Rows are compared by position: cells which changed are updated in place, rows
+    beyond the end of ``new_store`` are removed, and rows beyond the end of
+    ``store_to_edit`` are appended.
     """
-    old_store = [row[:] for row in store_to_edit]
+    old_rows = [row[:] for row in store_to_edit]
+    new_rows = [list(row) for row in new_store]
 
-    # Diff the lists to determine what needs to be changed.
-    diff = DeepDiff(old_store, new_store)
-    changed = diff.get("values_changed", {})
-    added = diff.get("iterable_item_added", {})
-    removed = diff.get("iterable_item_removed", {})
+    for i, (old_row, new_row) in enumerate(zip(old_rows, new_rows)):
+        for column, (old_value, new_value) in enumerate(zip(old_row, new_row)):
+            if old_value != new_value:
+                store_to_edit[i][column] = new_value
 
-    for edit_location, diff in changed.items():
-        idx, field = _parse_diff_location(edit_location)
-        store_to_edit[int(idx)][int(field)] = diff["new_value"]
+    for i in reversed(range(len(new_rows), len(old_rows))):
+        del store_to_edit[i]
 
-    for remove_location, _ in reversed(list(removed.items())):
-        remove_at = int(_parse_diff_location(remove_location)[0])
-        del store_to_edit[remove_at]
-
-    for _, value in added.items():
-        store_to_edit.append(value)
+    for row in new_rows[len(old_rows) :]:
+        store_to_edit.append(row)
 
 
 def diff_model_store(store_to_edit: Any, new_store: Iterable[Any]):
@@ -159,13 +148,13 @@ def diff_model_store(store_to_edit: Any, new_store: Iterable[Any]):
     The diff here is that if there are any differences, then we refresh the
     entire list. This is because it is too hard to do editing.
     """
-    old_store = store_to_edit[:]
-
-    diff = DeepDiff(old_store, new_store, exclude_regex_paths=deep_diff_exclude_regexp)
-    if diff == {}:
+    new_models = list(new_store)
+    old_values = [_model_values(model) for model in store_to_edit]
+    new_values = [_model_values(model) for model in new_models]
+    if old_values == new_values:
         return
 
-    store_to_edit.splice(0, len(store_to_edit), new_store)
+    store_to_edit.splice(0, len(store_to_edit), new_models)
 
 
 def show_song_popover(

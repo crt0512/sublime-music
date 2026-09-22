@@ -63,3 +63,7 @@ def main():
 
     app = SublimeMusicApp(Path(config_file))
     app.run(unknown_args)
+
+
+if __name__ == "__main__":
+    main()

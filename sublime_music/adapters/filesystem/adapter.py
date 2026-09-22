@@ -90,7 +90,10 @@ class FilesystemAdapter(CachingAdapter):
     # Database Migration
     # ==================================================================================
     def _migrate_db(self):
-        pass
+        # Directories cached before "-1" (gonic's "no parent") was normalised to "root".
+        models.Directory.update(parent_id="root").where(
+            models.Directory.parent_id == "-1"
+        ).execute()
 
     # Usage and Availability Properties
     # ==================================================================================
@@ -634,9 +637,21 @@ class FilesystemAdapter(CachingAdapter):
         elif data_key == KEYS.ARTISTS:
             for a in data:
                 self._do_ingest_new_data(KEYS.ARTIST, a.id, a, partial=True)
+            # Remove the artists which are no longer on the server, but keep the ones
+            # that cached songs or albums still refer to. Servers which only index album
+            # artists never list the track artists, and deleting those would leave the
+            # songs with dangling references.
             models.Artist.delete().where(
                 models.Artist.id.not_in([a.id for a in data])
                 & ~models.Artist.id.startswith("invalid")
+                & models.Artist.id.not_in(
+                    models.Song.select(models.Song.artist).where(models.Song.artist.is_null(False))
+                )
+                & models.Artist.id.not_in(
+                    models.Album.select(models.Album.artist).where(
+                        models.Album.artist.is_null(False)
+                    )
+                )
             ).execute()
 
         elif data_key == KEYS.COVER_ART_FILE:

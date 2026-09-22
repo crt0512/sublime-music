@@ -151,7 +151,10 @@ class Directory(SublimeAPI.Directory, DataClassJsonMixin):
     def __post_init__(self):
         if not isinstance(self.id, str):
             self.id = str(self.id)
-        self.parent_id = (self.parent_id or "root") if self.id != "root" else None
+        # Some servers (gonic) report "-1" instead of omitting the parent of a top-level
+        # directory, and asking for that directory fails.
+        parent_id = self.parent_id if self.parent_id != "-1" else None
+        self.parent_id = (parent_id or "root") if self.id != "root" else None
 
         self.name = self.name or self.title
         self.children = [

@@ -1,3 +1,4 @@
+import re
 import threading
 from datetime import timedelta
 from typing import Callable, Dict, Optional, Tuple, Type, Union, cast
@@ -42,6 +43,7 @@ class MPVPlayer(Player):
         config: Dict[str, Union[str, int, bool]],
     ):
         self.mpv = mpv.MPV()
+        self._mpv_version = MPVPlayer._parse_mpv_version(self.mpv.mpv_version)
         if MPVPlayer._is_mock:
             self.mpv.audio_device = "null"
         self.mpv.audio_client_name = "sublime-music"
@@ -123,6 +125,31 @@ class MPVPlayer(Player):
         self.mpv.volume = 0 if muted else self._volume
         self._muted = muted
 
+    @staticmethod
+    def _parse_mpv_version(version: str) -> Tuple[int, ...]:
+        """
+        Parses the ``mpv-version`` property into a comparable tuple.
+
+        >>> MPVPlayer._parse_mpv_version("mpv v0.40.0")
+        (0, 40, 0)
+        >>> MPVPlayer._parse_mpv_version("mpv 0.37.0-dirty")
+        (0, 37, 0)
+        >>> MPVPlayer._parse_mpv_version("unknown")
+        (0, 0, 0)
+        """
+        match = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
+        return tuple(int(group) for group in match.groups()) if match else (0, 0, 0)
+
+    def _loadfile(self, uri: str, flags: str, options: Dict[str, str]):
+        args: list = [uri, flags]
+        if self._mpv_version >= (0, 38, 0):
+            # mpv 0.38 inserted an ``index`` argument between the flags and the options.
+            # Passing the options in its place fails with "Invalid value for mpv
+            # parameter". -1 is the default index (the end of the playlist).
+            args.append(-1)
+        args.append(",".join(f"{k}={v}" for k, v in options.items()))
+        self.mpv.command("loadfile", *args)
+
     def play_media(self, uri: str, progress: timedelta, song: Song):
         with self._progress_value_lock:
             self._progress_value_count = 0
@@ -130,12 +157,10 @@ class MPVPlayer(Player):
         # Clears everything except the currently-playing song
         self.mpv.command("playlist-clear")
 
-        options = {
-            "force-seekable": "yes",
-            "start": str(progress.total_seconds()),
-        }
-        self.mpv.command(
-            "loadfile", uri, "replace", ",".join(f"{k}={v}" for k, v in options.items())
+        self._loadfile(
+            uri,
+            "replace",
+            {"force-seekable": "yes", "start": str(progress.total_seconds())},
         )
         self.mpv.pause = False
         self.song_loaded = True

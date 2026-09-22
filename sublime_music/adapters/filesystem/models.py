@@ -1,8 +1,9 @@
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 from peewee import (
     AutoField,
     BooleanField,
+    ForeignKeyAccessor,
     ForeignKeyField,
     IntegerField,
     Model,
@@ -20,6 +21,25 @@ from .sqlite_extensions import (
 )
 
 database = SqliteDatabase(None)
+
+
+class _ForeignKeyOrNoneAccessor(ForeignKeyAccessor):
+    def get_rel_instance(self, instance: Model) -> Any:
+        try:
+            return super().get_rel_instance(instance)
+        except self.rel_model.DoesNotExist:
+            return None
+
+
+class NullableForeignKeyField(ForeignKeyField):
+    """
+    A foreign key (declare it with ``null=True``) which reads as ``None`` when the
+    referenced row no longer exists, instead of raising ``DoesNotExist``. Referenced rows
+    can disappear underneath a cached object, for example when the artist index is
+    re-ingested.
+    """
+
+    accessor_class = _ForeignKeyOrNoneAccessor
 
 
 # Models
@@ -63,7 +83,7 @@ class Artist(BaseModel):
     music_brainz_id = TextField(null=True)
     last_fm_url = TextField(null=True)
 
-    _artist_image_url = ForeignKeyField(CacheInfo, null=True)
+    _artist_image_url = NullableForeignKeyField(CacheInfo, null=True)
 
     @property
     def artist_image_url(self) -> Optional[str]:
@@ -102,10 +122,10 @@ class Album(BaseModel):
     starred = TzDateTimeField(null=True)
     year = IntegerField(null=True)
 
-    artist = ForeignKeyField(Artist, null=True, backref="albums")
-    genre = ForeignKeyField(Genre, null=True, backref="albums")
+    artist = NullableForeignKeyField(Artist, null=True, backref="albums")
+    genre = NullableForeignKeyField(Genre, null=True, backref="albums")
 
-    _cover_art = ForeignKeyField(CacheInfo, null=True)
+    _cover_art = NullableForeignKeyField(CacheInfo, null=True)
 
     @property
     def cover_art(self) -> Optional[str]:
@@ -164,12 +184,12 @@ class Song(BaseModel):
     duration = DurationField(null=True)
 
     parent_id = TextField(null=True)
-    album = ForeignKeyField(Album, null=True, backref="_songs")
-    artist = ForeignKeyField(Artist, null=True)
-    genre = ForeignKeyField(Genre, null=True, backref="songs")
+    album = NullableForeignKeyField(Album, null=True, backref="_songs")
+    artist = NullableForeignKeyField(Artist, null=True)
+    genre = NullableForeignKeyField(Genre, null=True, backref="songs")
 
     # figure out how to deal with different transcodings, etc.
-    file = ForeignKeyField(CacheInfo, null=True)
+    file = NullableForeignKeyField(CacheInfo, null=True)
 
     @property
     def size(self) -> Optional[int]:
@@ -185,7 +205,7 @@ class Song(BaseModel):
         except Exception:
             return None
 
-    _cover_art = ForeignKeyField(CacheInfo, null=True)
+    _cover_art = NullableForeignKeyField(CacheInfo, null=True)
 
     @property
     def cover_art(self) -> Optional[str]:
@@ -220,7 +240,7 @@ class Playlist(BaseModel):
         artists = Album.select()
         return prefetch(self._songs, albums, artists)
 
-    _cover_art = ForeignKeyField(CacheInfo, null=True)
+    _cover_art = NullableForeignKeyField(CacheInfo, null=True)
 
     @property
     def cover_art(self) -> Optional[str]:

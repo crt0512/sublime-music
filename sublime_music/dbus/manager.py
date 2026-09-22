@@ -5,7 +5,6 @@ from collections import defaultdict
 from datetime import timedelta
 from typing import Any, Callable, DefaultDict, Dict, List, Match, Optional, Tuple
 
-from deepdiff import DeepDiff
 from gi.repository import Gio, GLib
 
 from ..adapters import AdapterManager, CacheMissError
@@ -359,30 +358,41 @@ class DBusManager:
 
         return tracks
 
-    diff_parse_re = re.compile(r"root\['(.*?)'\]\['(.*?)'\](?:\[.*\])?")
+    @staticmethod
+    def _changed_properties(
+        old_state: Dict[str, Dict[str, Any]], new_state: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Returns the properties in ``new_state`` which differ from ``old_state``, grouped by
+        interface. Properties are compared as a whole, so a change anywhere inside the
+        ``Metadata`` dictionary or the ``Position`` tuple yields the entire new value.
+
+        >>> old = {"a.b": {"Volume": 1.0, "Position": ("x", 0)}, "a.c": {"Tracks": []}}
+        >>> new = {"a.b": {"Volume": 1.0, "Position": ("x", 5)}, "a.c": {"Tracks": ["/1"]}}
+        >>> DBusManager._changed_properties(old, new)
+        {'a.b': {'Position': ('x', 5)}, 'a.c': {'Tracks': ['/1']}}
+        >>> DBusManager._changed_properties({}, {"a.b": {"Volume": 1.0}})
+        {'a.b': {'Volume': 1.0}}
+        >>> DBusManager._changed_properties(new, new)
+        {}
+        """
+        changes: Dict[str, Dict[str, Any]] = {}
+        for interface, properties in new_state.items():
+            old_properties = old_state.get(interface, {})
+            changed = {
+                name: value
+                for name, value in properties.items()
+                if name not in old_properties or old_properties[name] != value
+            }
+            if changed:
+                changes[interface] = changed
+        return changes
 
     def property_diff(self):
         new_property_dict = self.property_dict()
-        diff = DeepDiff(self.current_state, new_property_dict)
-
-        changes: dict[str, dict[str, Any]] = defaultdict(dict)
-
-        for path, change in diff.get("values_changed", {}).items():
-            if m := self.diff_parse_re.match(path):
-                interface, property_name = m.groups()
-                changes[interface][property_name] = change["new_value"]
-            else:
-                logging.warning(f"Couldn't parse path {path} for diff")
-
-        if diff.get("dictionary_item_added"):
-            changes = new_property_dict
+        changes = self._changed_properties(self.current_state, new_property_dict)
 
         for interface, changed_props in changes.items():
-            # If the metadata has changed, just make the entire Metadata object
-            # part of the update.
-            if "Metadata" in changed_props.keys():
-                changed_props["Metadata"] = new_property_dict[interface]["Metadata"]
-
             # Special handling for when the position changes (a seek).
             # Technically, I'm sending this signal too often, but I don't think
             # it really matters.

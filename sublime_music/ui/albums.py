@@ -9,7 +9,7 @@ from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
 from ..adapters import AdapterManager, AlbumSearchQuery, CacheMissError, Result, api_objects as API
 from ..config import AppConfiguration
 from ..ui import util
-from ..ui.common import AlbumWithSongs, IconButton, LoadError, SpinnerImage
+from ..ui.common import AlbumWithSongs, DigitsEntry, IconButton, LoadError, SpinnerImage
 
 
 def _to_type(query_type: AlbumSearchQuery.Type) -> str:
@@ -121,11 +121,10 @@ class AlbumsPanel(Gtk.Box):
         self.prev_page.connect("clicked", self.on_prev_page_clicked)
         page_widget.add(self.prev_page)
         page_widget.add(Gtk.Label(label="Page"))
-        self.page_entry = Gtk.Entry()
+        self.page_entry = DigitsEntry(is_allowed=self.page_number_exists)
         self.page_entry.set_width_chars(1)
         self.page_entry.set_max_width_chars(1)
         self.page_entry.connect("changed", self.on_page_entry_changed)
-        self.page_entry.connect("insert-text", self.on_page_entry_insert_text)
         page_widget.add(self.page_entry)
         page_widget.add(Gtk.Label(label="of"))
         self.page_count_label = Gtk.Label(label="-")
@@ -422,19 +421,11 @@ class AlbumsPanel(Gtk.Box):
             )
         return False
 
-    def on_page_entry_insert_text(
-        self, entry: Gtk.Entry, text: str, length: int, position: int
-    ) -> bool:
-        if self.updating_query:
-            return False
-        if not text.isdigit():
-            entry.emit_stop_by_name("insert-text")
+    def page_number_exists(self, text: str) -> bool:
+        # While the query is being updated the entry is set programmatically.
+        if self.updating_query or self.grid_pages_count is None:
             return True
-        page_num = int(entry.get_text() + text)
-        if self.grid_pages_count is None or self.grid_pages_count < page_num:
-            entry.emit_stop_by_name("insert-text")
-            return True
-        return False
+        return int(text) <= self.grid_pages_count
 
     def on_prev_page_clicked(self, _):
         self.emit_if_not_updating(
@@ -771,7 +762,8 @@ class AlbumsGrid(Gtk.Overlay):
         #              add extra padding.
         # 200     + (10      * 2) + (5      * 2) = 230
         # picture + (padding * 2) + (margin * 2)
-        new_items_per_row = min((rect.width // 230), 7)
+        # The first resize can arrive before the grid has any width; never go below 1.
+        new_items_per_row = max(1, min((rect.width // 230), 7))
         if new_items_per_row != self.items_per_row:
             self.items_per_row = new_items_per_row
             self.detail_box_inner.set_size_request(self.items_per_row * 230 - 10, -1)
