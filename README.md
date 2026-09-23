@@ -10,7 +10,7 @@ Sublime Music is a native, GTK3, Subsonic client for the Linux Desktop.
 > Should also work with Navidrome and others (if they dont return all songs on empty search3 string they might be a bit slower though)
 ---
 
-[![The Albums tab of Sublime Music with the Play Queue opened.](docs/_static/screenshots/play-queue.png)](docs/_static/screenshots/play-queue.png)
+[![The Albums tab of Sublime Music with the Play Queue opened.](docs/_static/screenshots/albums.png)](docs/_static/screenshots/play-queue.png)
 
 The Albums tab of Sublime Music with the Play Queue opened.
 
