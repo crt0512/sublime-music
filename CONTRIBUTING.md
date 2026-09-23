@@ -19,7 +19,7 @@ make format     # black and isort
 ```
 
 `make help` lists every target, including the packaging ones (`deb`, `install`,
-`uninstall`, `build`, `pkg`). The bundled dependencies are pinned in
+`uninstall`, `build`, `freeze`, `pkg`; `BUNDLE=2|1|0` picks the flavour, see the README). The bundled dependencies are pinned in
 `packaging/vendor-requirements.txt`; `make vendor-lock` upgrades them, after which
 `make venv` and `make test` should be run again.
 

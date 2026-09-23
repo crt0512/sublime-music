@@ -19,7 +19,7 @@ from ..adapters import (
     SongQuery,
 )
 from ..adapters.api_objects import Song
-from ..config import AppConfiguration
+from ..config import MAX_PLAY_FROM_HERE_COUNT, AppConfiguration
 from ..ui import util
 from ..ui.common import IconButton, LoadError
 
@@ -102,10 +102,25 @@ FILL_CHUNK = 500
 # When the app starts on this tab, the library is loaded this long after the window is on
 # screen, so that the window appears and settles first.
 STARTUP_LOAD_DELAY_MS = 500
-# "Play from here" queues the songs after the chosen one in the table, up to this many.
-# The play queue is handled song by song elsewhere in the app (details, cover art, DBus),
-# so queueing a whole library would freeze it.
-MAX_QUEUE_LENGTH = 1000
+# "Play from here" queues the chosen song and the ones after it in the table:
+# ``AppConfiguration.play_from_here_count`` of them, never more than this. The play queue
+# is handled song by song elsewhere in the app (details, cover art, DBus), so queueing a
+# whole library would freeze it.
+MAX_QUEUE_LENGTH = MAX_PLAY_FROM_HERE_COUNT
+
+
+def play_from_range(index: int, count: int, total: int) -> range:
+    """
+    The rows "Play from here" queues: ``count`` rows from ``index``, within the table.
+
+    >>> play_from_range(10, 128, 20)
+    range(10, 20)
+    >>> play_from_range(0, 5000, 3000)
+    range(0, 1024)
+    >>> play_from_range(3, 0, 10)
+    range(3, 4)
+    """
+    return range(index, min(index + max(1, min(count, MAX_QUEUE_LENGTH)), total))
 
 
 def _format_datetime(value: Optional[datetime]) -> str:
@@ -349,10 +364,14 @@ class SongsPanel(Gtk.Box):
 
     # Updating
     # =========================================================================
+    # Settings > Play Queue > "Play from Here" (kept from the last update()).
+    play_from_count: int = 128
+
     def update(self, app_config: AppConfiguration, force: bool = False):
         if self.offline_mode != app_config.offline_mode:
             self.tree.get_selection().unselect_all()
         self.offline_mode = app_config.offline_mode
+        self.play_from_count = app_config.play_from_here_count
 
         self._updating = True
         try:
@@ -681,8 +700,8 @@ class SongsPanel(Gtk.Box):
 
     def play_from(self, index: int):
         """Plays the song at ``index`` followed by the songs after it in the table."""
-        end = min(index + MAX_QUEUE_LENGTH, len(self.store))
-        self.play([self.store[i][SONG_ID] for i in range(index, end)])
+        rows = play_from_range(index, self.play_from_count, len(self.store))
+        self.play([self.store[i][SONG_ID] for i in rows])
 
     # Starring and rating
     # =========================================================================
@@ -810,8 +829,10 @@ class SongsPanel(Gtk.Box):
         widget_coords = tree.convert_tree_to_widget_coords(event.x, event.y)
 
         clicked_index = clicked_path[0].get_indices()[0]
+        rows = play_from_range(clicked_index, self.play_from_count, len(self.store))
         play_from_here = Gtk.ModelButton(
-            text="Play from here", sensitive=self.store[clicked_index][PLAYABLE]
+            text=f"Play from here ({len(rows)} songs)",
+            sensitive=self.store[clicked_index][PLAYABLE],
         )
 
         util.show_song_popover(

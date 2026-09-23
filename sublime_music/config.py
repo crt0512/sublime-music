@@ -117,6 +117,10 @@ def decode_providers(
     }
 
 
+# The most "Play from here" may queue, whatever the setting says.
+MAX_PLAY_FROM_HERE_COUNT = 1024
+
+
 @dataclass
 class AppConfiguration(DataClassJsonMixin):
     version: int = 5
@@ -146,6 +150,9 @@ class AppConfiguration(DataClassJsonMixin):
     # than ``queue_replacement_warning_size`` songs.
     confirm_queue_replacement: bool = True
     queue_replacement_warning_size: int = 1
+    # How many songs "Play from here" in the Songs tab queues (the chosen one and the
+    # ones after it in the table); at most MAX_PLAY_FROM_HERE_COUNT.
+    play_from_here_count: int = 128
 
     # Song library: sync it automatically every so many minutes (0 = only by hand).
     song_library_sync_interval_minutes: int = 0

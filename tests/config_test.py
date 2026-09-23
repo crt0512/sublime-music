@@ -91,3 +91,17 @@ def test_config_migrate_v5_to_v6(config_filename: Path, cwd: Path):
     app_config.save()
     app_config2 = AppConfiguration.load_from_file(config_filename)
     assert app_config == app_config2
+
+
+def test_new_settings_default_for_old_config_files(tmp_path: Path):
+    # A config file written before these settings existed must still load, with the
+    # defaults filled in.
+    config_filename = tmp_path / "config.json"
+    config_filename.write_text('{"version": 6, "providers": {}}')
+
+    config = AppConfiguration.load_from_file(config_filename)
+
+    assert config.play_from_here_count == 128
+    assert config.confirm_queue_replacement is True
+    assert config.queue_replacement_warning_size == 1
+    assert config.song_library_sync_interval_minutes == 0

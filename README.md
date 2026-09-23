@@ -62,11 +62,16 @@ make deb
 sudo apt install ./dist/sublime-music_*_bundled.deb
 ```
 
-The default package bundles the Python dependencies (downloaded with pip while building,
-at the versions pinned in `packaging/vendor-requirements.txt`; `make vendor-lock` refreshes those deliberately), so distribution updates cannot break the app; only Python, PyGObject/GTK and libmpv come from the system.
+Three flavours, chosen with `BUNDLE=`:
 
-`make deb BUNDLE=0` builds a thin package that depends on Debian's `python3-*` packages instead.
-Install it with `--no-install-recommends` if apt wants to pull in half the archive for no good reason.
+| `make deb BUNDLE=`          | what is inside the package                                                                        | size (installed) |
+|-----------------------------|---------------------------------------------------------------------------------------------------|------------------|
+| `2`, *full*                 | everything: tossed in the deb file, only glibc, X11 and OpenGL come from the system (stupid dont) | 110 MB (320 MB)  |
+| `1`, *bundled*, **default** | The Python dependencies are bundled, PyGObject/GTK and libmpv come from Debian's packages         | 8 MB (42 MB)     |
+| `0`, *thin*                 | only the app, rest via APT repos                                                                  | 0.2 MB (1.5 MB)  |
+
+Full package shouldnt be used unless you really need to for whatever reason (like me trying to run it on a hacked embedded linux appliance where i cant change the actuall root partitions files)
+The bundled and full packages are obviously tied to the machine's architecture the thin one to what your package manager has to offer.
 
 ### Without a package
 
@@ -76,7 +81,7 @@ sudo make install     # copies the staged tree under /usr/local
 sudo make uninstall   # removes it again
 ```
 
-`PREFIX=...` changes the location and `BUNDLE=0` gives the thin flavour, for both.
+`PREFIX=...` changes the location and `BUNDLE=` picks the flavour, for both.
 
 ### Running from the source tree
 
@@ -87,28 +92,21 @@ make run ARGS="-m debug"    # with debug logging
 
 ### macOS
 
-`make pkg` builds `Sublime Music.app` and a `.pkg` installer.
-
-Run it on a Mac with the Xcode command line tools.
-
-Since GTK is not bundled on MacDonalds Computer: 
-install `python@3 pygobject3 gtk+3 adwaita-icon-theme mpv` with Homebrew or MacPorts first.
-
----
-
-## Disclaimers on things
+`make pkg` on a Mac builds a self-contained `Sublime Music.app` (Python, GTK, PyGObject,
+libmpv and all Python dependencies inside, built with PyInstaller) and wraps it in
+`dist/SublimeMusic-<version>-bundled.pkg`, which installs it into `/Applications`.
+Homebrew/MacPorts is needed to build it, not to run it by default.
+If you use `make pkg BUNDLE=0` it builds a thin app that uses the Homebrew/MacPorts Python and GTK instead.
 
 ### Change of Build system/Method
 
 Upstream built with flit and pip-tools, published to PyPI through GitHub Actions and shipped a Nix flake.
 
 The fork is built by the root `Makefile` described above.
-
 `pyproject.toml` still declares the metadata and dependencies (so `pip install .` keeps working), while the pip-tools lock files.
-
 The pre-commit config, the Nix flake and the GitHub workflows were removed. The Sphinx docs in `docs/` can still be built locally with
 
-`make -C docs html` Makes the docs (but wont publish em anywhere)
+I know the makefile stuff looks like a mess and it partially is but it helped me run Sublime music on an arm64 based Linux Cash Register that I use as a Music Hub now.
 
 ### Code
 Because of my "cant write code in tabbed language" disability, which stems from having the "i write ugly but functional code" syndrome (rust fmt my beloved thanks for existing), most of the code changes and comments were heavily assisted by LLMs.

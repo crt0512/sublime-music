@@ -5,7 +5,7 @@ import bleach
 from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 
 from ..adapters import AdapterManager, DownloadProgress, Result, api_objects as API
-from ..config import AppConfiguration, ProviderConfiguration
+from ..config import MAX_PLAY_FROM_HERE_COUNT, AppConfiguration, ProviderConfiguration
 from ..players import PlayerManager
 from ..ui import albums, artists, browse, player_controls, playlists, songs, util
 from ..ui.common import DigitsEntry, IconButton, IconMenuButton, SpinnerImage
@@ -199,6 +199,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.queue_replacement_warning_size_entry.set_sensitive(
             app_config.confirm_queue_replacement
         )
+        self.play_from_here_count_entry.set_value(app_config.play_from_here_count)
         self.song_library_sync_interval_entry.set_value(
             app_config.song_library_sync_interval_minutes
         )
@@ -789,6 +790,17 @@ class MainWindow(Gtk.ApplicationWindow):
             "Only When Longer Than (Songs)", 1, 1000, 1, "queue_replacement_warning_size"
         )
         vbox.add(queue_replacement_warning_size_box)
+        (
+            play_from_here_count_box,
+            self.play_from_here_count_entry,
+        ) = self._create_spin_button_menu_item(
+            '"Play from Here" Queues (Songs)',
+            1,
+            MAX_PLAY_FROM_HERE_COUNT,
+            16,
+            "play_from_here_count",
+        )
+        vbox.add(play_from_here_count_box)
 
         # SONG LIBRARY SETTINGS
         # ==============================================================================

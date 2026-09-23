@@ -3,7 +3,7 @@
 # Run `make help` for the list of targets. The usual flow on Debian/Ubuntu is
 #
 #     make deb                # dist/sublime-music_<version>_<arch>_bundled.deb
-#     sudo dpkg -i dist/*.deb
+#     sudo dpkg -i dist/sublime-music*.deb
 #
 # or, without a package,
 #
@@ -12,10 +12,12 @@
 #     sudo make uninstall
 #
 # Dependency flavours (BUNDLE=1 is the default):
-#   BUNDLE=1  bundled: the Python dependencies are downloaded with pip and shipped
-#             inside the package, so distribution updates cannot break the app.
-#             Only Python itself, PyGObject/GTK and libmpv come from the system,
-#             because they must match the system's GTK.
+#   BUNDLE=2  full: a self-contained build made with PyInstaller. Python, GTK,
+#             PyGObject, libmpv (with ffmpeg) and the Python dependencies are all
+#             inside the package; only glibc, X11 and OpenGL come from the system.
+#             Big (a few hundred MB installed), but literally nothing on the system can break it.
+#   BUNDLE=1  bundled: the Python dependencies are downloaded with pip and shipped inside the package.
+#             Python itself, PyGObject/GTK and libmpv come from the system.
 #   BUNDLE=0  thin: nothing is bundled, the package depends on the distribution's
 #             python3-* packages instead (see THIN_DEPENDS below).
 #
@@ -31,7 +33,7 @@ NAME     := sublime-music
 PACKAGE  := sublime_music
 APP_ID   := app.sublimemusic.SublimeMusic
 VERSION  := $(shell sed -n 's/^__version__ = "\(.*\)"/\1/p' $(PACKAGE)/__init__.py)
-FLAVOUR  := $(if $(filter 0,$(BUNDLE)),thin,bundled)
+FLAVOUR  := $(if $(filter 0,$(BUNDLE)),thin,$(if $(filter 2,$(BUNDLE)),full,bundled))
 DEB_ARCH := $(shell dpkg-architecture -qDEB_HOST_ARCH 2>/dev/null || uname -m)
 PY_MINOR := $(shell $(PYTHON) -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 PY_NEXT  := $(shell $(PYTHON) -c 'import sys; print("%d.%d" % (sys.version_info[0], sys.version_info[1] + 1))')
@@ -43,6 +45,10 @@ STAGE_ROOT ?= $(BUILD)/stage-$(FLAVOUR)
 DEB_ROOT   := $(BUILD)/deb-$(FLAVOUR)
 WHEEL      := dist/$(PACKAGE)-$(VERSION)-py3-none-any.whl
 VENV       := .venv
+PYI_VENV   := $(BUILD)/pyinstaller-venv
+PYI_DIST   := $(BUILD)/pyi
+PYI_SPEC   := packaging/pyinstaller/$(NAME).spec
+PYI_FILES  := $(PYI_SPEC) packaging/pyinstaller/entry.py packaging/pyinstaller/runtime_hook.py
 # $(call TOOL,name): the tool from .venv when it exists, otherwise whatever is on PATH.
 TOOL        = $(if $(wildcard $(VENV)/bin/$(1)),$(VENV)/bin/$(1),$(1))
 
@@ -63,7 +69,7 @@ THIN_RECOMMENDS := $(RECOMMENDS), python3-keyring
 
 SOURCES := $(shell find $(PACKAGE) -type f -not -path '*/__pycache__/*')
 
-.PHONY: help build vendor vendor-lock stage install uninstall deb pkg run test lint format venv clean distclean
+.PHONY: help build vendor vendor-lock freeze stage install uninstall deb pkg run test lint format venv clean distclean
 
 help: ## Show this help
 	@echo "Sublime Music (Plus) $(VERSION), flavour: $(FLAVOUR) (BUNDLE=$(BUNDLE))"
@@ -101,16 +107,49 @@ vendor-lock: ## Refresh packaging/vendor-requirements.txt with the newest versio
 	rm -rf $(BUILD)/vendor-lock
 	@echo "Locked $$(grep -c . $(VENDOR_LOCK)) packages in $(VENDOR_LOCK); run the tests, then commit it."
 
+# ----------------------------------------------------------------------------
+# Self-contained build with PyInstaller (the "full" flavour, and the macOS bundle)
+# ----------------------------------------------------------------------------
+
+# On macOS the venv is made with Homebrew's Python, the one Homebrew's PyGObject is
+# built for; it sees that PyGObject through the system site-packages and gets
+# everything else (the app's dependencies at their locked versions, PyInstaller)
+# installed into itself.
+PYI_PYTHON := $(if $(filter Darwin,$(shell uname)),$(shell brew --prefix 2>/dev/null)/bin/python3,$(PYTHON))
+
+$(PYI_VENV)/.stamp: pyproject.toml $(wildcard $(VENDOR_LOCK))
+	rm -rf $(PYI_VENV)
+	$(PYI_PYTHON) -m venv --system-site-packages $(PYI_VENV)
+	$(PYI_VENV)/bin/pip install --upgrade pip
+	$(PYI_VENV)/bin/pip install --ignore-installed $(VENDOR_SPEC) "pyinstaller >=6, <7"
+	@$(PYI_VENV)/bin/python -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' \
+	    || { echo "PyGObject with GTK 3 is not available to $(PYI_PYTHON) (python3-gi on Debian, pygobject3 from Homebrew)"; exit 1; }
+	touch $@
+
+freeze: $(PYI_DIST)/.stamp ## Freeze the app with PyInstaller into build/pyi/sublime-music (what BUNDLE=2 packages)
+
+$(PYI_DIST)/.stamp: $(PYI_VENV)/.stamp $(SOURCES) $(PYI_FILES)
+	$(PYI_VENV)/bin/pip install --no-deps --force-reinstall --quiet .
+	rm -rf $(PYI_DIST)
+	$(PYI_VENV)/bin/pyinstaller --noconfirm --clean --distpath $(PYI_DIST) --workpath $(BUILD)/pyi-work $(PYI_SPEC)
+	touch $@
+
 # The installed tree, assembled under $(STAGE_ROOT)$(PREFIX). `install` copies it
 # to $(DESTDIR)$(PREFIX) and `deb` wraps it into a package.
 stage: $(STAGE_ROOT).stamp ## Assemble the installed tree under build/ (respects PREFIX and BUNDLE)
 
 # The stamp lives next to the tree, not inside it, so that it never ends up in a package.
-$(STAGE_ROOT).stamp: $(if $(filter bundled,$(FLAVOUR)),$(VENDOR)/.stamp) $(SOURCES) packaging/launcher.sh.in packaging/$(NAME).1.in packaging/debian/copyright packaging/$(NAME).desktop $(NAME).metainfo.xml LICENSE README.md CHANGELOG.rst
+$(STAGE_ROOT).stamp: Makefile $(if $(filter bundled,$(FLAVOUR)),$(VENDOR)/.stamp) $(if $(filter full,$(FLAVOUR)),$(PYI_DIST)/.stamp) $(SOURCES) packaging/launcher.sh.in packaging/launcher-full.sh.in packaging/debian/lintian-overrides packaging/$(NAME).1.in packaging/debian/copyright packaging/$(NAME).desktop $(NAME).metainfo.xml LICENSE README.md CHANGELOG.rst
 	rm -rf $(STAGE_ROOT)
 	install -d $(STAGE_ROOT)$(LIBDIR) $(STAGE_ROOT)$(PREFIX)/bin
+ifeq ($(FLAVOUR),full)
+	cp -r $(PYI_DIST)/$(NAME) $(STAGE_ROOT)$(LIBDIR)/
+	sed -e 's|@LIBDIR@|$(LIBDIR)|g' packaging/launcher-full.sh.in > $(STAGE_ROOT)$(PREFIX)/bin/$(NAME)
+else
 	cp -r $(PACKAGE) $(STAGE_ROOT)$(LIBDIR)/
 	find $(STAGE_ROOT)$(LIBDIR) -name __pycache__ -type d -prune -exec rm -rf {} +
+	sed -e 's|@LIBDIR@|$(LIBDIR)|g' -e 's|@PYTHON@|python3|g' packaging/launcher.sh.in > $(STAGE_ROOT)$(PREFIX)/bin/$(NAME)
+endif
 ifeq ($(FLAVOUR),bundled)
 	cp -r $(VENDOR) $(STAGE_ROOT)$(LIBDIR)/vendor
 	@# Drop what is not needed at runtime: the stamp, peewee's pwiz tool, shell scripts.
@@ -123,7 +162,6 @@ ifeq ($(FLAVOUR),bundled)
 	    find $(STAGE_ROOT)$(LIBDIR)/vendor -name '*.so' -exec strip --strip-unneeded {} + ; \
 	fi
 endif
-	sed -e 's|@LIBDIR@|$(LIBDIR)|g' -e 's|@PYTHON@|python3|g' packaging/launcher.sh.in > $(STAGE_ROOT)$(PREFIX)/bin/$(NAME)
 	chmod 755 $(STAGE_ROOT)$(PREFIX)/bin/$(NAME)
 	install -Dm644 packaging/$(NAME).desktop -t $(STAGE_ROOT)$(PREFIX)/share/applications
 	@# AppStream wants the metainfo file named after the component id.
@@ -140,6 +178,15 @@ endif
 	@# Normalise the modes: the repository's files may be 0664, packages want 0644.
 	find $(STAGE_ROOT) -type f -exec chmod 644 {} +
 	chmod 755 $(STAGE_ROOT)$(PREFIX)/bin/$(NAME)
+ifeq ($(FLAVOUR),full)
+	chmod 755 $(STAGE_ROOT)$(LIBDIR)/$(NAME)/$(NAME)
+	install -Dm644 packaging/debian/lintian-overrides $(STAGE_ROOT)$(PREFIX)/share/lintian/overrides/$(NAME)
+	@# Wheels ship unstripped extension modules (never strip the executable itself:
+	@# PyInstaller appends its archive to it).
+	if command -v strip >/dev/null 2>&1; then \
+	    find $(STAGE_ROOT)$(LIBDIR)/$(NAME) -name '*.so*' -type f -exec strip --strip-unneeded {} + ; \
+	fi
+endif
 	touch $@
 
 # ----------------------------------------------------------------------------
@@ -166,6 +213,7 @@ uninstall: ## Remove what `make install` put under $(DESTDIR)$(PREFIX)
 	done
 	rm -f $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/$(NAME).svg
 	rm -rf $(DESTDIR)$(PREFIX)/share/doc/$(NAME)
+	rm -f $(DESTDIR)$(PREFIX)/share/lintian/overrides/$(NAME)
 	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/$(NAME).1.gz
 	@# Refresh the desktop caches, but only on a real install (not into a DESTDIR).
 	@if [ -z "$(DESTDIR)" ]; then \
@@ -178,13 +226,16 @@ uninstall: ## Remove what `make install` put under $(DESTDIR)$(PREFIX)
 # Debian package
 # ----------------------------------------------------------------------------
 
-deb: ## Build a .deb into dist/ (BUNDLE=0 for the thin flavour)
+deb: ## Build a .deb into dist/ (BUNDLE=1 bundled Python deps, BUNDLE=2 fully self-contained, BUNDLE=0 thin)
 	$(MAKE) stage STAGE_ROOT=$(DEB_ROOT) PREFIX=/usr
 	rm -rf $(DEB_ROOT)/DEBIAN
 	install -d $(DEB_ROOT)/DEBIAN dist
 	@# A bundled package with compiled extension modules only works with the Python
 	@# it was downloaded for; a pure-Python one works with any Python 3.10+.
-	@if [ "$(FLAVOUR)" = bundled ]; then \
+	@if [ "$(FLAVOUR)" = full ]; then \
+	    arch="$(DEB_ARCH)"; depends="$$(packaging/debian/host-deps.sh $(DEB_ROOT)/usr/lib/$(NAME)/$(NAME))"; \
+	    recommends="$(RECOMMENDS)"; \
+	elif [ "$(FLAVOUR)" = bundled ]; then \
 	    if find $(DEB_ROOT)/usr/lib/$(NAME)/vendor -name '*.so' | grep -q .; then \
 	        arch="$(DEB_ARCH)"; depends="python3 (>= $(PY_MINOR)), python3 (<< $(PY_NEXT)), libc6 (>= 2.17), $(SYSTEM_DEPENDS)"; \
 	    else \
@@ -205,23 +256,21 @@ deb: ## Build a .deb into dist/ (BUNDLE=0 for the thin flavour)
 	dpkg-deb --root-owner-group --build $(DEB_ROOT) dist/$(NAME)_$(VERSION)_$${arch}_$(FLAVOUR).deb
 
 # ----------------------------------------------------------------------------
-# macOS: an .app bundle wrapped in a .pkg installer (run this on macOS)
+# macOS: "Sublime Music.app" wrapped in a .pkg installer (run this on macOS)
 # ----------------------------------------------------------------------------
+#
+# BUNDLE=1 (default): a self-contained app built with PyInstaller. Homebrew is needed to
+#   build it, not to run it: Python, GTK, PyGObject, libmpv and the Python dependencies
+#   are all copied into the bundle (the same PyInstaller spec as the Linux "full"
+#   flavour). See packaging/macos/README.md.
+# BUNDLE=0: a thin app that runs the Homebrew Python and GTK of the Mac it is installed on.
 
-APP := $(BUILD)/Sublime Music.app
+APP      := $(BUILD)/Sublime Music.app
+ICNS     := $(BUILD)/$(NAME).icns
+BREW     := $(shell brew --prefix 2>/dev/null)
+PKG      := dist/SublimeMusic-$(VERSION)-$(FLAVOUR).pkg
 
-pkg: ## macOS only: build "Sublime Music.app" and dist/SublimeMusic-<version>.pkg
-	@test "$$(uname)" = Darwin || { echo "make pkg builds a macOS bundle and only works on macOS"; exit 1; }
-	@command -v pkgbuild >/dev/null || { echo "pkgbuild (Xcode command line tools) is required"; exit 1; }
-	$(MAKE) vendor
-	rm -rf "$(APP)"
-	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources/lib"
-	cp -r $(PACKAGE) "$(APP)/Contents/Resources/lib/"
-	find "$(APP)/Contents/Resources/lib" -name __pycache__ -type d -prune -exec rm -rf {} +
-	cp -r $(VENDOR) "$(APP)/Contents/Resources/lib/vendor"
-	rm -f "$(APP)/Contents/Resources/lib/vendor/.stamp"
-	sed -e 's|@VERSION@|$(VERSION)|g' packaging/macos/Info.plist.in > "$(APP)/Contents/Info.plist"
-	install -m755 packaging/macos/launcher.sh "$(APP)/Contents/MacOS/$(NAME)"
+$(ICNS): $(wildcard logo/rendered/*.png)
 	rm -rf $(BUILD)/icon.iconset && mkdir -p $(BUILD)/icon.iconset
 	cp logo/rendered/16.png $(BUILD)/icon.iconset/icon_16x16.png
 	cp logo/rendered/32.png $(BUILD)/icon.iconset/icon_16x16@2x.png
@@ -230,11 +279,40 @@ pkg: ## macOS only: build "Sublime Music.app" and dist/SublimeMusic-<version>.pk
 	cp logo/rendered/128.png $(BUILD)/icon.iconset/icon_128x128.png
 	cp logo/rendered/512.png $(BUILD)/icon.iconset/icon_512x512.png
 	cp logo/rendered/1024.png $(BUILD)/icon.iconset/icon_512x512@2x.png
-	iconutil -c icns -o "$(APP)/Contents/Resources/$(NAME).icns" $(BUILD)/icon.iconset
-	mkdir -p dist
-	pkgbuild --component "$(APP)" --install-location /Applications \
-	    --identifier $(APP_ID) --version $(VERSION) \
-	    dist/SublimeMusic-$(VERSION).pkg
+	iconutil -c icns -o $@ $(BUILD)/icon.iconset
+
+pkg: ## macOS only: build "Sublime Music.app" and dist/SublimeMusic-<version>-<flavour>.pkg
+	@test "$$(uname)" = Darwin || { echo "make pkg builds a macOS bundle and only works on macOS"; exit 1; }
+	@test -n "$(BREW)" || { echo "Homebrew is required to build the app, see packaging/macos/README.md"; exit 1; }
+	$(MAKE) $(ICNS)
+	rm -rf "$(APP)"
+ifneq ($(FLAVOUR),thin)
+	$(MAKE) $(PYI_VENV)/.stamp
+	$(PYI_VENV)/bin/pip install --no-deps --force-reinstall --quiet .
+	HOMEBREW_PREFIX=$(BREW) $(PYI_VENV)/bin/pyinstaller --noconfirm --clean \
+	    --distpath $(BUILD) --workpath $(BUILD)/macos-work $(PYI_SPEC)
+else
+	$(MAKE) vendor
+	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources/lib"
+	cp -r $(PACKAGE) "$(APP)/Contents/Resources/lib/"
+	find "$(APP)/Contents/Resources/lib" -name __pycache__ -type d -prune -exec rm -rf {} +
+	cp -r $(VENDOR) "$(APP)/Contents/Resources/lib/vendor"
+	rm -f "$(APP)/Contents/Resources/lib/vendor/.stamp"
+	sed -e 's|@VERSION@|$(VERSION)|g' packaging/macos/Info.plist.in > "$(APP)/Contents/Info.plist"
+	install -m755 packaging/macos/launcher.sh "$(APP)/Contents/MacOS/$(NAME)"
+	cp $(ICNS) "$(APP)/Contents/Resources/$(NAME).icns"
+endif
+	codesign --force --deep --sign - "$(APP)"
+	@# The bundle must not be "relocatable": otherwise the installer updates whatever copy
+	@# of the app it finds on the disk (this build directory, say) instead of installing
+	@# into /Applications.
+	rm -rf $(BUILD)/pkgroot && mkdir -p $(BUILD)/pkgroot dist
+	cp -R "$(APP)" $(BUILD)/pkgroot/
+	pkgbuild --analyze --root $(BUILD)/pkgroot $(BUILD)/component.plist
+	/usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" $(BUILD)/component.plist
+	pkgbuild --root $(BUILD)/pkgroot --component-plist $(BUILD)/component.plist \
+	    --identifier $(APP_ID) --version $(VERSION) --install-location /Applications $(PKG)
+	@echo "Built $(PKG)"
 
 # ----------------------------------------------------------------------------
 # Development

@@ -1,0 +1,11 @@
+# The "full" flavour is a self-contained PyInstaller bundle: it deliberately ships the
+# Python interpreter, GTK, libmpv with ffmpeg and every other library it needs, so the
+# distribution's copies of them cannot break it. Lintian rightly notices that this is
+# not how Debian packages are normally built.
+# I know this is stupid but needed for one of my setups.
+sublime-music: embedded-library
+sublime-music: library-not-linked-against-libc
+sublime-music: custom-library-search-path
+sublime-music: shared-library-lacks-prerequisites
+sublime-music: hardening-no-pie
+sublime-music: unstripped-binary-or-object
