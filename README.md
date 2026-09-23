@@ -49,60 +49,57 @@ The Albums tab of Sublime Music with the Play Queue opened.
 ## Installation
 
 Sublime Music (Plus) is built and installed with the `Makefile` in the repository root.
-You need `python3` (3.10 or newer), `pip`, GNU make and, at runtime, GTK3 with PyGObject
-and libmpv. On Debian/Ubuntu:
+You need `python3` (3.10 or newer), `pip`, GNU make and at runtime GTK3 with PyGObject and libmpv
 
-    sudo apt install python3 python3-pip python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-notify-0.7 libmpv2
+To get those on Debian/Ubuntu:
+
+`sudo apt install python3 python3-pip python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-notify-0.7 libmpv2`
 
 ### Debian package (recommended)
 
-    make deb
-    sudo apt install ./dist/sublime-music_*_bundled.deb
+`make deb`
+`sudo apt install ./dist/sublime-music_*_bundled.deb`
 
 The default package bundles the Python dependencies (downloaded with pip while building),
-so distribution updates cannot break the app; only Python, PyGObject/GTK and libmpv come
-from the system. `make deb BUNDLE=0` builds a thin package that depends on Debian's
-`python3-*` packages instead (smaller, more moving parts; install it with
-`--no-install-recommends` if apt wants to pull in half the archive).
+so distribution updates cannot break the app; only Python, PyGObject/GTK and libmpv come from the system.
+
+`make deb BUNDLE=0` builds a thin package that depends on Debian's `python3-*` packages instead.
+Install it with `--no-install-recommends` if apt wants to pull in half the archive for no good reason.
 
 ### Without a package
 
-    make stage            # as your user, so build/ stays yours
-    sudo make install     # copies the staged tree under /usr/local
-    sudo make uninstall   # removes it again
+`make stage            # as your user, so build/ stays yours`
+`sudo make install     # copies the staged tree under /usr/local`
+`sudo make uninstall   # removes it again`
 
 `PREFIX=...` changes the location and `BUNDLE=0` gives the thin flavour, for both.
 
 ### Running from the source tree
 
-    make run                    # same as PYTHONPATH=. python3 -m sublime_music
-    make run ARGS="-m debug"    # with debug logging
+`make run                    # same as PYTHONPATH=. python3 -m sublime_music`
+`make run ARGS="-m debug"    # with debug logging`
 
 ### macOS
 
-`make pkg` builds `Sublime Music.app` and a `.pkg` installer; run it on a Mac with the
-Xcode command line tools. GTK is not bundled: install `python@3 pygobject3 gtk+3
-adwaita-icon-theme mpv` with Homebrew first. This target has not been tested yet.
+`make pkg` builds `Sublime Music.app` and a `.pkg` installer.
+Run it on a Mac with the Xcode command line tools. 
 
-### Other targets
-
-`make build` (wheel into `dist/`), `make test`, `make lint`, `make format`, `make venv`
-(a `.venv` with the dev tools on top of the system PyGObject) and `make clean`.
-`make help` lists everything.
+Since GTK is not bundled on MacDonalds Computer: install `python@3 pygobject3 gtk+3
+adwaita-icon-theme mpv` with Homebrew or MacPorts first.
 
 ---
-
 
 ## Disclaimers on things
 
 ### Change of Build system/Method
 
-Upstream built with flit and pip-tools, published to PyPI through GitHub Actions and
-shipped a Nix flake. The fork is built by the root `Makefile` described above.
-`pyproject.toml` still declares the metadata and dependencies (so `pip install .` keeps
-working), while the pip-tools lock files, the pre-commit config, the Nix flake and the
-GitHub workflows were removed. The Sphinx docs in `docs/` can still be built locally with
-`make -C docs html`; they are just not published anywhere.
+Upstream built with flit and pip-tools, published to PyPI through GitHub Actions and shipped a Nix flake. 
+The fork is built by the root `Makefile` described above.
+`pyproject.toml` still declares the metadata and dependencies (so `pip install .` keeps working), 
+while the pip-tools lock files.
+The pre-commit config, the Nix flake and theGitHub workflows were removed. The Sphinx docs in `docs/` can still be built locally with
+
+`make -C docs html` Makes the docs (but wont publish em anywhere)
 
 ### Code
 Because of my "cant write code in tabbed language" disability, which stems from having the "i write ugly but functional code" syndrome (rust fmt my beloved thanks for existing), most of the code changes and comments were heavily assisted by LLMs, Code has been inspected as best as I can with my rust/php coding skills, tests only inspected briefly, comments might be a bit slop like in certain places.
