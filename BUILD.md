@@ -20,6 +20,10 @@ sudo apt install python3 python3-pip python3-gi python3-gi-cairo gir1.2-gtk-3.0 
 make deb
 sudo apt install ./dist/sublime-music_*_bundled.deb
 ```
+- The deb file should be installable and runnable on most distros that ship the same glibc or newer
+    - If you want to save some space and have used bundle 1 or 2 you can technically uninstall these packages again :
+    `python3 python3-pip python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-notify-0.7 libmpv2`
+    - The ones that are still going to be needed for running the app only should be pulled by the deb file automatically in most cases, if the deb file seems to pull unnecessarily many packages on your distro use apt with `--no-install-recommends` and see if the app still runs. On most distros ive tested it ran fine without them.
 
 ### Installation without a package
 
@@ -80,8 +84,9 @@ sudo port install python313 py313-pip py313-gobject3 gtk3 gobject-introspection 
 
 - After the build/runtime dependencies are installed :
 `make pkg`
+- After which you'll find a runnable app in the build folder and an installable pkg in the dist folder
 
-#### Troubleshooting :
+### Troubleshootin on Mac :
 If your app doesnt launch after building on x86-64-v3 (Intel) just in case try installing [Xquartz](https://www.xquartz.org) and try opening the App after installing that, if it launches with that installed, If it does you managed to miss the "making MacPorts not use X11 for everything" step (like I did at first too), to fix do this in order :
 ```bash
 sudo port -n upgrade --enforce-variants glib2 +quartz -x11
