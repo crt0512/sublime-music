@@ -4,6 +4,7 @@ import random
 import shutil
 import subprocess
 import sys
+import threading
 from concurrent.futures import Future
 from datetime import datetime, timedelta
 from functools import partial
@@ -66,16 +67,43 @@ from .util import resolve_path
 MACOS_THEME_SYNC_INTERVAL_SECONDS = 5
 
 
+NSUserDefaults: Any = None
+if sys.platform == "darwin":
+    try:
+        # PyObjC ships with the macOS bundle (pulled in by the Now Playing bridge).
+        from Foundation import NSUserDefaults as _NSUserDefaults
+
+        NSUserDefaults = _NSUserDefaults
+    except Exception:
+        pass
+
+
 def macos_system_prefers_dark_theme() -> bool:
-    """Return whether macOS is currently using dark appearance."""
+    """
+    Return whether macOS is currently using dark appearance.
+
+    Reads the global preference in-process through PyObjC when it is available. The
+    fallback spawns ``defaults`` with an absolute path and ``close_fds=False`` so that
+    CPython uses posix_spawn: a plain fork() of the whole GTK + libmpv process briefly
+    blocks every other thread in it (malloc locks, copy-on-write page tables), which
+    is exactly what a real-time audio thread can't afford.
+    """
     if sys.platform != "darwin":
         return False
 
+    if NSUserDefaults is not None:
+        try:
+            style = NSUserDefaults.standardUserDefaults().stringForKey_("AppleInterfaceStyle")
+            return (style or "").lower() == "dark"
+        except Exception:
+            logging.debug("Could not read AppleInterfaceStyle via Foundation", exc_info=True)
+
     try:
         result = subprocess.run(
-            ["defaults", "read", "-g", "AppleInterfaceStyle"],
+            ["/usr/bin/defaults", "read", "-g", "AppleInterfaceStyle"],
             capture_output=True,
             check=False,
+            close_fds=False,
             text=True,
             timeout=2,
         )
@@ -1189,19 +1217,37 @@ class SublimeMusicApp(Gtk.Application):
         return True  # keep the timer running
 
     def sync_macos_system_theme(self) -> bool:
-        """Keep GTK's dark-theme preference in sync with macOS appearance."""
+        """
+        Keep GTK's dark-theme preference in sync with macOS appearance.
+
+        Runs on the GLib main loop every MACOS_THEME_SYNC_INTERVAL_SECONDS. The
+        in-process check is instant; the ``defaults`` fallback runs on a worker thread
+        so that it can't stall the UI (or anything waiting on it).
+        """
         if sys.platform != "darwin" or self.exiting:
             return False
 
-        prefers_dark = macos_system_prefers_dark_theme()
-        if prefers_dark == self._macos_prefers_dark_theme:
+        if NSUserDefaults is not None:
+            self._apply_macos_system_theme(macos_system_prefers_dark_theme())
             return True
+
+        def check():
+            prefers_dark = macos_system_prefers_dark_theme()
+            GLib.idle_add(self._apply_macos_system_theme, prefers_dark)
+
+        threading.Thread(target=check, name="macos-theme-sync", daemon=True).start()
+        return True
+
+    def _apply_macos_system_theme(self, prefers_dark: bool) -> bool:
+        # Returns False so that it is not repeated when scheduled via GLib.idle_add.
+        if self.exiting or prefers_dark == self._macos_prefers_dark_theme:
+            return False
 
         settings = Gtk.Settings.get_default()
         if settings:
             settings.set_property("gtk-application-prefer-dark-theme", prefers_dark)
         self._macos_prefers_dark_theme = prefers_dark
-        return True
+        return False
 
     def on_app_shutdown(self, app: "SublimeMusicApp"):
         self.exiting = True
