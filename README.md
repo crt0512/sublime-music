@@ -100,16 +100,20 @@ install `python@3 pygobject3 gtk+3 adwaita-icon-theme mpv` with Homebrew or MacP
 
 ### Change of Build system/Method
 
-Upstream built with flit and pip-tools, published to PyPI through GitHub Actions and shipped a Nix flake. 
+Upstream built with flit and pip-tools, published to PyPI through GitHub Actions and shipped a Nix flake.
+
 The fork is built by the root `Makefile` described above.
-`pyproject.toml` still declares the metadata and dependencies (so `pip install .` keeps working), 
-while the pip-tools lock files.
-The pre-commit config, the Nix flake and theGitHub workflows were removed. The Sphinx docs in `docs/` can still be built locally with
+
+`pyproject.toml` still declares the metadata and dependencies (so `pip install .` keeps working), while the pip-tools lock files.
+
+The pre-commit config, the Nix flake and the GitHub workflows were removed. The Sphinx docs in `docs/` can still be built locally with
 
 `make -C docs html` Makes the docs (but wont publish em anywhere)
 
 ### Code
-Because of my "cant write code in tabbed language" disability, which stems from having the "i write ugly but functional code" syndrome (rust fmt my beloved thanks for existing), most of the code changes and comments were heavily assisted by LLMs, Code has been inspected as best as I can with my rust/php coding skills, tests only inspected briefly, comments might be a bit slop like in certain places.
+Because of my "cant write code in tabbed language" disability, which stems from having the "i write ugly but functional code" syndrome (rust fmt my beloved thanks for existing), most of the code changes and comments were heavily assisted by LLMs.
+
+Code has been inspected as best as I can with my rust/php coding skills, tests only inspected briefly, comments might be a bit slop aswell as in docs that were updated by them without asking.
 
 ## Motivations, Credits and Thank You's
 
