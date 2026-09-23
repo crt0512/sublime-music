@@ -16,7 +16,6 @@ from .common import IconButton, IconToggleButton, RatingButtonBox, SpinnerImage
 from .common.rating_button import RatingButton
 from .state import RepeatType
 
-
 SCALE_THUMB_CLICK_TOLERANCE_PX = 12
 
 
@@ -55,6 +54,12 @@ class PlayerControls(Gtk.ActionBar):
     offline_mode = False
     updating_starred = False
     current_starred = False
+
+    # Created in create_song_display(); declared here so that their types are known in
+    # the methods above it.
+    album_art: SpinnerImage
+    album_name: Gtk.Label
+    artist_name: Gtk.Label
 
     def __init__(self):
         Gtk.ActionBar.__init__(self)
@@ -639,7 +644,8 @@ class PlayerControls(Gtk.ActionBar):
         # Scrubber and song progress/length labels
         scrubber_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
 
-        self.song_progress_label = Gtk.Label(label="-:--")
+        self.song_progress_label = Gtk.Label(label="-:--", xalign=1)
+        self.song_progress_label.set_name("song-progress-label")
         scrubber_box.pack_start(self.song_progress_label, False, False, 5)
 
         self.song_scrubber = Gtk.Scale.new_with_range(
@@ -656,8 +662,18 @@ class PlayerControls(Gtk.ActionBar):
         self.song_scrubber.connect("change-value", lambda s, t, v: self.emit("song-scrub", v))
         scrubber_box.pack_start(self.song_scrubber, True, True, 0)
 
-        self.song_duration_label = Gtk.Label(label="-:--")
+        self.song_duration_label = Gtk.Label(label="-:--", xalign=0)
+        self.song_duration_label.set_name("song-duration-label")
         scrubber_box.pack_start(self.song_duration_label, False, False, 5)
+
+        # The action bar centres this whole widget at its natural width, so if the
+        # progress label got wider or narrower as the seconds tick, every control in
+        # here would shift sideways. Keep both time labels as wide as the wider one (the
+        # duration, which only changes with the song). The stylesheet also asks for
+        # tabular digits, so that all digits have the same width.
+        self._time_label_size_group = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
+        self._time_label_size_group.add_widget(self.song_progress_label)
+        self._time_label_size_group.add_widget(self.song_duration_label)
 
         box.add(scrubber_box)
 

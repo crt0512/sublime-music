@@ -33,8 +33,9 @@ else:
         import gi
 
         gi.require_version("Notify", "0.7")
-        from gi.repository import Notify  # mypy: ignore
+        from gi.repository import Notify as _Notify
 
+        Notify = _Notify
         glib_notify_exists = True
     except Exception:
         # I really don't care what kind of exception it is, all that matters is the
@@ -53,6 +54,7 @@ from .adapters import (
 from .adapters.api_objects import Playlist, PlayQueue, Song
 from .config import AppConfiguration, ProviderConfiguration
 from .dbus import DBusManager, dbus_propagate
+from .desktop_media_keys import DesktopMediaKeys
 from .macos_media import MacOSMediaSession
 from .players import PlayerDeviceEvent, PlayerEvent, PlayerManager
 from .ui import util
@@ -60,7 +62,6 @@ from .ui.configure_provider import ConfigureProviderDialog
 from .ui.main import MainWindow
 from .ui.state import RepeatType, UIState
 from .util import resolve_path
-
 
 MACOS_THEME_SYNC_INTERVAL_SECONDS = 5
 
@@ -120,6 +121,7 @@ class SublimeMusicApp(Gtk.Application):
         self.dbus_manager: Optional[DBusManager] = None
         self._macos_prefers_dark_theme: Optional[bool] = None
         self.macos_media_session: Optional[MacOSMediaSession] = None
+        self.desktop_media_keys: Optional[DesktopMediaKeys] = None
 
         self.connect("shutdown", self.on_app_shutdown)
 
@@ -187,13 +189,27 @@ class SublimeMusicApp(Gtk.Application):
 
         if sys.platform == "darwin":
             self.macos_media_session = MacOSMediaSession(
-                play=lambda: GLib.idle_add(self._macos_media_play),
-                pause=lambda: GLib.idle_add(self._macos_media_pause),
+                play=lambda: GLib.idle_add(self._media_play),
+                pause=lambda: GLib.idle_add(self._media_pause),
                 play_pause=lambda: GLib.idle_add(self.on_play_pause),
                 next_track=lambda: GLib.idle_add(self.on_next_track),
                 previous_track=lambda: GLib.idle_add(self.on_prev_track),
-                seek=lambda seconds: GLib.idle_add(self._macos_media_seek, seconds),
+                seek=lambda seconds: GLib.idle_add(self._media_seek, seconds),
             )
+        else:
+            # GNOME-style desktops hand the keyboard's media keys to whoever grabbed
+            # them through the settings daemon, before falling back to MPRIS. The
+            # callbacks arrive on the main loop, so they can drive the app directly.
+            self.desktop_media_keys = DesktopMediaKeys(
+                "Sublime Music",
+                play_pause=self.on_play_pause,
+                pause=self._media_pause,
+                next_track=self.on_next_track,
+                previous_track=self.on_prev_track,
+                repeat=self.on_repeat_press,
+                shuffle=self.on_shuffle_press,
+            )
+            self.desktop_media_keys.start()
 
     def do_activate(self):
         # We only allow a single window and raise any existing ones
@@ -267,6 +283,7 @@ class SublimeMusicApp(Gtk.Application):
         self.window.connect("notification-closed", self.on_notification_closed)
         self.window.connect("go-to", self.on_window_go_to)
         self.window.connect("key-press-event", self.on_window_key_press)
+        self.window.connect("focus-in-event", self.on_window_focus_in)
         self.window.player_controls.connect("song-scrub", self.on_song_scrub)
         self.window.player_controls.connect("device-update", self.on_device_update)
         self.window.player_controls.connect("volume-change", self.on_volume_change)
@@ -1033,15 +1050,17 @@ class SublimeMusicApp(Gtk.Application):
         current_song = self.app_config.state.current_song
         if not current_song:
             return
+        # A name that is a Song rather than an Optional[Song], for the closure below.
+        song: Song = current_song
 
-        previous_starred = current_song.starred
+        previous_starred = song.starred
 
         def on_done(future: Result):
             if future.cancelled():
                 return
             exception = future.exception()
             if exception:
-                current_song.starred = previous_starred
+                song.starred = previous_starred
                 self.app_config.state.current_notification = UIState.UINotification(
                     markup="<b>Unable to star song.</b>",
                     icon="dialog-error",
@@ -1050,8 +1069,8 @@ class SublimeMusicApp(Gtk.Application):
             elif self.window:
                 self.window.player_controls.update_starred(starred)
 
-        current_song.starred = datetime.now().astimezone() if starred else None
-        AdapterManager.set_song_starred(current_song.id, starred).add_done_callback(on_done)
+        song.starred = datetime.now().astimezone() if starred else None
+        AdapterManager.set_song_starred(song.id, starred).add_done_callback(on_done)
 
     def on_device_update(self, _, device_id: str):
         if device_id == self.app_config.state.current_device:
@@ -1085,17 +1104,17 @@ class SublimeMusicApp(Gtk.Application):
         self.player_manager.set_volume(self.app_config.state.volume)
         self.update_window()
 
-    def _macos_media_play(self):
+    def _media_play(self) -> bool:
         if not self.app_config.state.playing:
             self.on_play_pause()
         return False
 
-    def _macos_media_pause(self):
+    def _media_pause(self) -> bool:
         if self.app_config.state.playing:
             self.on_play_pause()
         return False
 
-    def _macos_media_seek(self, seconds: float):
+    def _media_seek(self, seconds: float) -> bool:
         current_song = self.app_config.state.current_song
         if not current_song or not current_song.duration:
             return False
@@ -1109,6 +1128,13 @@ class SublimeMusicApp(Gtk.Application):
                 self.app_config.state.song_progress,
                 self.app_config.state.playing,
             )
+
+    def on_window_focus_in(self, *args) -> bool:
+        # The settings daemon sends the media keys to the most recent grabber, so grab
+        # them again in case another player grabbed them since we did.
+        if self.desktop_media_keys:
+            self.desktop_media_keys.grab()
+        return False
 
     def on_window_key_press(self, window: Gtk.Window, event: Gdk.EventKey) -> bool:
         # Need to use bitwise & here to see if CTRL is pressed.
@@ -1184,6 +1210,9 @@ class SublimeMusicApp(Gtk.Application):
 
         if tap_imported and self.tap:
             self.tap.stop()
+
+        if self.desktop_media_keys:
+            self.desktop_media_keys.shutdown()
 
         if self.app_config.provider is None:
             return

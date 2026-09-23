@@ -9,9 +9,24 @@ import random
 import string
 import tempfile
 from datetime import datetime, timedelta
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from time import sleep
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Set,
+    Tuple,
+    Type,
+    Union,
+    cast,
+)
 from urllib.parse import urlencode, urlparse
 
 import requests
@@ -56,7 +71,21 @@ if always_error := os.environ.get("NETWORK_ALWAYS_ERROR"):
     NETWORK_ALWAYS_ERROR = True
 
 
-def _ping_process_context() -> multiprocessing.context.BaseContext:
+class _ProcessContext(Protocol):
+    """The part of a multiprocessing context that is used here.
+
+    typeshed only declares ``Process`` on the concrete contexts (fork, spawn, default),
+    not on ``BaseContext``, so the helper below is typed structurally instead. A
+    read-only property (rather than an attribute) lets each context's own Process
+    subclass satisfy it.
+    """
+
+    @property
+    def Process(self) -> Type[BaseProcess]:  # noqa: N802 (matches multiprocessing)
+        ...
+
+
+def _ping_process_context() -> _ProcessContext:
     """
     Return the multiprocessing context for the Subsonic ping worker.
 
@@ -253,7 +282,7 @@ class SubsonicAdapter(Adapter):
         self.use_salt_auth = config["salt_auth"]
 
         self.is_shutting_down = False
-        self._ping_process: Optional[multiprocessing.Process] = None
+        self._ping_process: Optional[BaseProcess] = None
         self._version = multiprocessing.Array("c", 20)
         self._offline_mode = False
 

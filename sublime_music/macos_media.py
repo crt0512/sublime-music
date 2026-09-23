@@ -5,18 +5,23 @@ PyObjC is not installed. The packaged macOS app bundles PyObjC's MediaPlayer bri
 which lets Sublime Music appear in Control Center/Now Playing and receive remote
 playback commands.
 """
+
 from __future__ import annotations
 
 import logging
 import sys
 from datetime import timedelta
-from typing import Callable, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from .adapters.api_objects import Song
 
-if sys.platform == "darwin":
+# A plain boolean (rather than comparing sys.platform inline) so that the type checker
+# analyses the import block on every platform.
+IS_MACOS = sys.platform == "darwin"
+
+if IS_MACOS:
     try:
-        from MediaPlayer import (  # type: ignore
+        from MediaPlayer import (
             MPMediaItemPropertyAlbumTitle,
             MPMediaItemPropertyArtist,
             MPMediaItemPropertyPlaybackDuration,
@@ -50,7 +55,7 @@ class MacOSMediaSession:
         seek: Callable[[float], None],
     ):
         self.available = MEDIAPLAYER_AVAILABLE
-        self._command_targets = []
+        self._command_targets: List[Tuple[Any, Any]] = []
         self._last_song_id: Optional[str] = None
         self._last_playing: Optional[bool] = None
         self._last_elapsed_seconds: Optional[int] = None
@@ -69,10 +74,10 @@ class MacOSMediaSession:
         self._install_command(self._command_center.previousTrackCommand(), previous_track)
         self._install_seek_command(seek)
 
-    def _install_command(self, command, callback: Callable[[], None]):
+    def _install_command(self, command: Any, callback: Callable[[], None]):
         command.setEnabled_(True)
 
-        def handler(_event):
+        def handler(_event: Any) -> int:
             try:
                 callback()
                 return MPRemoteCommandHandlerStatusSuccess
@@ -86,7 +91,7 @@ class MacOSMediaSession:
         command = self._command_center.changePlaybackPositionCommand()
         command.setEnabled_(True)
 
-        def handler(event):
+        def handler(event: Any) -> int:
             try:
                 callback(float(event.positionTime()))
                 return MPRemoteCommandHandlerStatusSuccess

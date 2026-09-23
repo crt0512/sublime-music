@@ -21,6 +21,7 @@ The Albums tab of Sublime Music with the Play Queue opened.
 - The Songs tab: the whole library in one sortable, filterable table.
 - Clear Cue Button in Cue
 - Cue Replacement Warnings
+- Keyboard media key grabber so your browser doesnt steal media keys from you (on GNOME based stuff and MacOS, rest can still be stolen by your browser unfortunately)
 
 ### Improvements and Bugfixes :
 
@@ -36,7 +37,6 @@ The Albums tab of Sublime Music with the Play Queue opened.
 - Switch between multiple Subsonic API (v1.8.0+) compliant servers.
 - Play music through Chromecast devices on the same LAN.
 - Offline Mode where Sublime Music will not make any network requests.
-- DBus MPRIS interface integration for controlling Sublime Music via clients such as `playerctl`, `i3status-rust`, KDE Connect, and many commonly used desktop environments.
 - Browse songs by the sever reported filesystem structure, or view them organized by ID3 tags in the Albums, Artists, and Playlists views.
 - Intuitive play queue.
 - Create/delete/edit playlists.
