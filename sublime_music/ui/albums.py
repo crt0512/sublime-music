@@ -493,7 +493,7 @@ class AlbumsGrid(Gtk.Overlay):
         def __repr__(self) -> str:
             return f"<AlbumsGrid._AlbumModel {self.album}>"
 
-    current_query: AlbumSearchQuery = AlbumSearchQuery(AlbumSearchQuery.Type.RANDOM)
+    current_query: AlbumSearchQuery = AlbumSearchQuery(AlbumSearchQuery.Type.NEWEST)
     current_models: List[_AlbumModel] = []
     latest_applied_order_ratchet: int = 0
     order_ratchet: int = 0

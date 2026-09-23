@@ -22,6 +22,7 @@ The Albums tab of Sublime Music with the Play Queue opened.
 - Clear Cue Button in Cue
 - Cue Replacement Warnings
 - Keyboard media key grabber so your browser doesnt steal media keys from you (on GNOME based stuff and MacOS, rest can still be stolen by your browser unfortunately)
+- Makefile and port to MacOS
 
 ### Improvements and Bugfixes :
 
@@ -46,81 +47,17 @@ The Albums tab of Sublime Music with the Play Queue opened.
 
 - ci/cd (didnt feel like it)
 
-## Installation
+## Building and Installing
 
-Sublime Music (Plus) is built and installed with the `Makefile` in the repository root.
-You need `python3` (3.10 or newer), `pip`, GNU make and at runtime GTK3 with PyGObject and libmpv
-
-To get those on Debian/Ubuntu:
-
-`sudo apt install python3 python3-pip python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-notify-0.7 libmpv2`
-
-### Debian package (recommended)
-
-```
-make deb
-sudo apt install ./dist/sublime-music_*_bundled.deb
-```
-
-Three flavours, chosen with `BUNDLE=`:
-
-| `make deb BUNDLE=`          | what is inside the package                                                                        | size (installed) |
-|-----------------------------|---------------------------------------------------------------------------------------------------|------------------|
-| `2`, *full*                 | everything: tossed in the deb file, only glibc, X11 and OpenGL come from the system (stupid dont) | 110 MB (320 MB)  |
-| `1`, *bundled*, **default** | The Python dependencies are bundled, PyGObject/GTK and libmpv come from Debian's packages         | 8 MB (42 MB)     |
-| `0`, *thin*                 | only the app, rest via APT repos                                                                  | 0.2 MB (1.5 MB)  |
-
-Full package shouldnt be used unless you really need to for whatever reason (like me trying to run it on a hacked embedded linux appliance where i cant change the actuall root partitions files)
-The bundled and full packages are obviously tied to the machine's architecture the thin one to what your package manager has to offer.
-
-### Without a package
-
-```
-make stage            # as your user, so build/ stays yours
-sudo make install     # copies the staged tree under /usr/local
-sudo make uninstall   # removes it again
-```
-
-`PREFIX=...` changes the location and `BUNDLE=` picks the flavour, for both.
-
-### Running from the source tree
-
-```
-make run                    # same as PYTHONPATH=. python3 -m sublime_music
-make run ARGS="-m debug"    # with debug logging
-```
-
-### macOS
-You probably dont want to actually use this on MacOS tbh, using quiet some hacky ways to get it running without homebrew dependencies. Seems usable to me by now
-
-You'll need this based on your System Architecture :
-
-aarch64 : 
-```
-xcode-select --install
-brew install python@3 pygobject3 gtk+3 gobject-introspection adwaita-icon-theme librsvg mpv fontconfig
-make pkg
-```
-
-x86-64 :
-```
-xcode-select --install
-sudo port install python313 py313-pip py313-gobject3 gtk3 gobject-introspection adwaita-icon-theme librsvg mpv fontconfig
-```
-
-`make pkg` on a Mac builds a self contained `Sublime Music.app` (Python, GTK, PyGObject, libmpv and all Python dependencies inside, built with PyInstaller) and wraps it in `dist/SublimeMusic-<version>-bundled.pkg`, which installs it into `/Applications`.
-
-Homebrew/MacPorts is needed to build it, not to run it in theory.
-
-If you use `make pkg BUNDLE=0` it builds a thin app that uses the Homebrew/MacPorts Python and GTK instead of bundling it in.
+See [BUILD.md](BUILD.md)
 
 ### Change of Build system/Method
 
-Upstream built with flit and pip-tools, published to PyPI through GitHub Actions and shipped a Nix flake.
+Upstream used to build with flit and pip-tools, published to PyPI through GitHub Actions and shipped a Nix flake.
 
-The fork is built by the root `Makefile` described above.
-`pyproject.toml` still declares the metadata and dependencies (so `pip install .` keeps working), while the pip-tools lock files.
-The pre-commit config, the Nix flake and the GitHub workflows were removed. The Sphinx docs in `docs/` can still be built locally with
+This fork is built by the `Makefile` found in the projectroot,
+The pre-commit config, Nix flake and the GitHub workflows were removed.
+The Sphinx docs in `docs/` can still be built locally if you really need to
 
 I know the makefile stuff looks like a mess and it partially is but it helped me run Sublime music on an arm64 based Linux Cash Register that I use as a Music Hub now.
 

@@ -87,7 +87,7 @@ class UIState:
 
     current_album_search_query: AlbumSearchQuery = field(
         default_factory=lambda: AlbumSearchQuery(
-            AlbumSearchQuery.Type.RANDOM,
+            AlbumSearchQuery.Type.NEWEST,
             genre=UIState._DefaultGenre(),
             year_range=this_decade(),
         )

@@ -22,9 +22,19 @@
 #             python3-* packages instead (see THIN_DEPENDS below).
 #
 # Variables you may want to override: PYTHON, PREFIX (default /usr/local for
-# install, always /usr for deb), DESTDIR, BUNDLE, MAINTAINER.
+# install, always /usr for deb), DESTDIR, BUNDLE, MAINTAINER, MACOS_PREFIX.
 
-PYTHON  ?= python3
+# macOS: where GTK, PyGObject and libmpv come from, Homebrew (brew --prefix) or
+# MacPorts (/opt/local). MACOS_PYTHON is the first python3 in that prefix that can
+# import PyGObject (MacPorts has no bare python3, only python3.13 and so on).
+ifeq ($(shell uname),Darwin)
+MACOS_PREFIX ?= $(or $(shell brew --prefix 2>/dev/null),$(patsubst %/bin/port,%,$(shell command -v port 2>/dev/null)))
+MACOS_PYTHON := $(shell for p in $(MACOS_PREFIX)/bin/python3 $(MACOS_PREFIX)/bin/python3.[0-9]*; do \
+    case $$p in (*-config) continue;; esac; \
+    [ -x $$p ] && $$p -c 'import gi' 2>/dev/null && { echo $$p; break; }; done)
+endif
+
+PYTHON  ?= $(or $(MACOS_PYTHON),python3)
 PREFIX  ?= /usr/local
 DESTDIR ?=
 BUNDLE  ?= 1
@@ -117,11 +127,11 @@ vendor-lock: ## Refresh packaging/vendor-requirements.txt with the newest versio
 # Self-contained build with PyInstaller (the "full" flavour, and the macOS bundle)
 # ----------------------------------------------------------------------------
 
-# On macOS the venv is made with Homebrew's Python, the one Homebrew's PyGObject is
+# On macOS the venv is made with Homebrew's/MacPorts' Python, the one its PyGObject is
 # built for; it sees that PyGObject through the system site-packages and gets
 # everything else (the app's dependencies at their locked versions, PyInstaller)
 # installed into itself.
-PYI_PYTHON := $(if $(filter Darwin,$(shell uname)),$(shell brew --prefix 2>/dev/null)/bin/python3,$(PYTHON))
+PYI_PYTHON := $(or $(MACOS_PYTHON),$(PYTHON))
 
 $(PYI_VENV)/.stamp: pyproject.toml $(wildcard $(VENDOR_LOCK))
 	rm -rf $(PYI_VENV)
@@ -129,7 +139,7 @@ $(PYI_VENV)/.stamp: pyproject.toml $(wildcard $(VENDOR_LOCK))
 	$(PYI_VENV)/bin/pip install --upgrade pip
 	$(PYI_VENV)/bin/pip install --ignore-installed $(VENDOR_SPEC) $(MACOS_DEPS) "pyinstaller >=6, <7"
 	@$(PYI_VENV)/bin/python -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' \
-	    || { echo "PyGObject with GTK 3 is not available to $(PYI_PYTHON) (python3-gi on Debian, pygobject3 from Homebrew)"; exit 1; }
+	    || { echo "PyGObject with GTK 3 is not available to $(PYI_PYTHON) (python3-gi on Debian, pygobject3 from Homebrew, py3xx-gobject3 from MacPorts)"; exit 1; }
 	touch $@
 
 freeze: $(PYI_DIST)/.stamp ## Freeze the app with PyInstaller into build/pyi/sublime-music (what BUNDLE=2 packages)
@@ -265,7 +275,7 @@ deb: ## Build a .deb into dist/ (BUNDLE=1 bundled Python deps, BUNDLE=2 fully se
 # macOS: "Sublime Music.app" wrapped in a .pkg installer (run this on macOS)
 # ----------------------------------------------------------------------------
 #
-# BUNDLE=1 (default): a self-contained app built with PyInstaller. Homebrew is needed to
+# BUNDLE=1 (default): a self-contained app built with PyInstaller. Homebrew or MacPorts is needed to
 #   build it, not to run it: Python, GTK, PyGObject, libmpv and the Python dependencies
 #   are all copied into the bundle (the same PyInstaller spec as the Linux "full"
 #   flavour). See packaging/macos/README.md.
@@ -273,7 +283,6 @@ deb: ## Build a .deb into dist/ (BUNDLE=1 bundled Python deps, BUNDLE=2 fully se
 
 APP      := $(BUILD)/Sublime Music.app
 ICNS     := $(BUILD)/$(NAME).icns
-BREW     := $(shell brew --prefix 2>/dev/null)
 PKG      := dist/SublimeMusic-$(VERSION)-$(FLAVOUR).pkg
 
 $(ICNS): $(wildcard logo/rendered/*.png)
@@ -289,13 +298,13 @@ $(ICNS): $(wildcard logo/rendered/*.png)
 
 pkg: ## macOS only: build "Sublime Music.app" and dist/SublimeMusic-<version>-<flavour>.pkg
 	@test "$$(uname)" = Darwin || { echo "make pkg builds a macOS bundle and only works on macOS"; exit 1; }
-	@test -n "$(BREW)" || { echo "Homebrew is required to build the app, see packaging/macos/README.md"; exit 1; }
+	@test -n "$(MACOS_PREFIX)" || { echo "Homebrew or MacPorts is required to build the app, see packaging/macos/README.md"; exit 1; }
 	$(MAKE) $(ICNS)
 	rm -rf "$(APP)"
 ifneq ($(FLAVOUR),thin)
 	$(MAKE) $(PYI_VENV)/.stamp
 	$(PYI_VENV)/bin/pip install --no-deps --force-reinstall --quiet .
-	HOMEBREW_PREFIX=$(BREW) $(PYI_VENV)/bin/pyinstaller --noconfirm --clean \
+	MACOS_PREFIX=$(MACOS_PREFIX) $(PYI_VENV)/bin/pyinstaller --noconfirm --clean \
 	    --distpath $(BUILD) --workpath $(BUILD)/macos-work $(PYI_SPEC)
 else
 	$(MAKE) vendor

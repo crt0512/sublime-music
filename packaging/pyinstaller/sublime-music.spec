@@ -38,11 +38,14 @@ install_macos_gio_typedef_fix()
 def find_libmpv():
     """The libmpv shared library to bundle; python-mpv loads it with ctypes."""
     if MACOS:
-        brew = os.environ.get("HOMEBREW_PREFIX") or subprocess.run(
-            ["brew", "--prefix"], capture_output=True, text=True, check=True
-        ).stdout.strip()
-        candidates = [os.path.join(brew, "lib", "libmpv.2.dylib")]
-        hint = "brew install mpv"
+        # Homebrew or MacPorts; the Makefile passes MACOS_PREFIX.
+        prefix = os.environ.get("MACOS_PREFIX") or os.environ.get("HOMEBREW_PREFIX")
+        if not prefix:
+            prefix = subprocess.run(
+                ["brew", "--prefix"], capture_output=True, text=True, check=True
+            ).stdout.strip()
+        candidates = [os.path.join(prefix, "lib", "libmpv.2.dylib")]
+        hint = "brew install mpv, or sudo port install mpv +libmpv"
     else:
         candidates = glob.glob("/usr/lib/*/libmpv.so.2") + glob.glob("/usr/lib*/libmpv.so.2")
         hint = "apt install libmpv2"
@@ -56,8 +59,8 @@ datas = collect_data_files("sublime_music")  # icons, CSS, API specs, MPRIS XML
 if MACOS:
     # fontconfig's configuration: without it pango finds no fonts and text renders as
     # boxes. Linux hosts have their own /etc/fonts.
-    brew = os.path.dirname(os.path.dirname(find_libmpv()))
-    datas.append((os.path.join(brew, "etc", "fonts"), "etc/fonts"))
+    prefix = os.path.dirname(os.path.dirname(find_libmpv()))
+    datas.append((os.path.join(prefix, "etc", "fonts"), "etc/fonts"))
 
 # PyInstaller follows libmpv's dependencies (ffmpeg, libass, ...) and makes them load
 # from inside the bundle.
