@@ -91,7 +91,7 @@ make run ARGS="-m debug"    # with debug logging
 ```
 
 ### macOS
-You probably dont want to actually use this on MacOS tbh, stability is a bit meh meh especially mpv wise. If you really have to heres how to :
+You probably dont want to actually use this on MacOS tbh, using quiet some hacky ways to get it running without homebrew dependencies. Seems usable to me by now
 
 You'll need this based on your System Architecture :
 
