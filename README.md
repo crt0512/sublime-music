@@ -57,8 +57,10 @@ To get those on Debian/Ubuntu:
 
 ### Debian package (recommended)
 
-`make deb`
-`sudo apt install ./dist/sublime-music_*_bundled.deb`
+```
+make deb
+sudo apt install ./dist/sublime-music_*_bundled.deb
+```
 
 The default package bundles the Python dependencies (downloaded with pip while building),
 so distribution updates cannot break the app; only Python, PyGObject/GTK and libmpv come from the system.
@@ -68,24 +70,29 @@ Install it with `--no-install-recommends` if apt wants to pull in half the archi
 
 ### Without a package
 
-`make stage            # as your user, so build/ stays yours`
-`sudo make install     # copies the staged tree under /usr/local`
-`sudo make uninstall   # removes it again`
+```
+make stage            # as your user, so build/ stays yours
+sudo make install     # copies the staged tree under /usr/local
+sudo make uninstall   # removes it again
+```
 
 `PREFIX=...` changes the location and `BUNDLE=0` gives the thin flavour, for both.
 
 ### Running from the source tree
 
-`make run                    # same as PYTHONPATH=. python3 -m sublime_music`
-`make run ARGS="-m debug"    # with debug logging`
+```
+make run                    # same as PYTHONPATH=. python3 -m sublime_music
+make run ARGS="-m debug"    # with debug logging
+```
 
 ### macOS
 
 `make pkg` builds `Sublime Music.app` and a `.pkg` installer.
-Run it on a Mac with the Xcode command line tools. 
 
-Since GTK is not bundled on MacDonalds Computer: install `python@3 pygobject3 gtk+3
-adwaita-icon-theme mpv` with Homebrew or MacPorts first.
+Run it on a Mac with the Xcode command line tools.
+
+Since GTK is not bundled on MacDonalds Computer: 
+install `python@3 pygobject3 gtk+3 adwaita-icon-theme mpv` with Homebrew or MacPorts first.
 
 ---
 
