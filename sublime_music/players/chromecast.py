@@ -28,6 +28,22 @@ SERVE_FILES_KEY = "Serve Local Files to Chromecasts on the LAN"
 LAN_PORT_KEY = "LAN Server Port Number"
 
 
+def _server_process_context() -> multiprocessing.context.BaseContext:
+    """
+    Return the multiprocessing context for the Chromecast LAN file server.
+
+    The server process serves files via the already-configured AdapterManager and
+    shared token/song-id buffers, so it relies on fork-style state inheritance. macOS
+    defaults to spawn, and frozen spawn would also need to pickle the whole
+    ChromecastPlayer, including GTK callbacks from the app. Prefer fork when the
+    platform offers it and fall back to the default context elsewhere.
+    """
+    try:
+        return multiprocessing.get_context("fork")
+    except ValueError:
+        return multiprocessing.get_context()
+
+
 class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
     name = "Chromecast"
     can_start_playing_with_no_latency = False
@@ -93,7 +109,7 @@ class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
                 except Exception:
                     pass
 
-            self.server_process = multiprocessing.Process(
+            self.server_process = _server_process_context().Process(
                 target=self._run_server_process,
                 args=("0.0.0.0", self.config.get(LAN_PORT_KEY)),
             )

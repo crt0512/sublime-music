@@ -133,3 +133,5 @@ dmypy.json
 TODO.md
 DEPS.md
 SONGS.md
+.DS_Store
+Thumbs.db

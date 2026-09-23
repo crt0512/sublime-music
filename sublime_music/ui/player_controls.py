@@ -16,6 +16,9 @@ from .common import IconButton, IconToggleButton, RatingButtonBox, SpinnerImage
 from .state import RepeatType
 
 
+SCALE_THUMB_CLICK_TOLERANCE_PX = 12
+
+
 class PlayerControls(Gtk.ActionBar):
     """
     Defines the player controls panel that appears at the bottom of the window.
@@ -392,6 +395,45 @@ class PlayerControls(Gtk.ActionBar):
         if not self.editing:
             self.emit("volume-change", scale.get_value())
 
+    def _scale_value_at_event(self, scale: Gtk.Scale, event: Gdk.EventButton) -> float:
+        allocation = scale.get_allocation()
+        width = max(1, allocation.width)
+        x = min(max(event.x, 0), width)
+        adjustment = scale.get_adjustment()
+        lower = adjustment.get_lower()
+        upper = adjustment.get_upper()
+        return lower + (x / width) * (upper - lower)
+
+    def _scale_current_value_x(self, scale: Gtk.Scale) -> float:
+        allocation = scale.get_allocation()
+        adjustment = scale.get_adjustment()
+        lower = adjustment.get_lower()
+        upper = adjustment.get_upper()
+        if upper == lower:
+            return 0
+        return allocation.width * ((scale.get_value() - lower) / (upper - lower))
+
+    def _on_scale_button_press(
+        self,
+        scale: Gtk.Scale,
+        event: Gdk.EventButton,
+        signal_name: str | None = None,
+    ) -> bool:
+        if event.button != 1:
+            return False
+
+        # If the click is on the thumb, let GTK handle dragging normally. Trough clicks
+        # are handled here because GTK's default page-step behavior is surprising on
+        # macOS: the control jumps much farther than the clicked position implies.
+        if abs(event.x - self._scale_current_value_x(scale)) <= SCALE_THUMB_CLICK_TOLERANCE_PX:
+            return False
+
+        value = self._scale_value_at_event(scale, event)
+        scale.set_value(value)
+        if signal_name:
+            self.emit(signal_name, value)
+        return True
+
     def on_play_queue_click(self, _: Any):
         if self.play_queue_popover.is_visible():
             self.play_queue_popover.popdown()
@@ -580,6 +622,11 @@ class PlayerControls(Gtk.ActionBar):
         self.song_scrubber.set_name("song-scrubber")
         self.song_scrubber.set_draw_value(False)
         self.song_scrubber.set_restrict_to_fill_level(False)
+        self.song_scrubber.connect(
+            "button-press-event",
+            self._on_scale_button_press,
+            "song-scrub",
+        )
         self.song_scrubber.connect("change-value", lambda s, t, v: self.emit("song-scrub", v))
         scrubber_box.pack_start(self.song_scrubber, True, True, 0)
 
@@ -795,7 +842,7 @@ class PlayerControls(Gtk.ActionBar):
         column.set_resizable(True)
         self.play_queue_list.append_column(column)
 
-        renderer = Gtk.CellRendererText(markup=True, ellipsize=Pango.EllipsizeMode.END)
+        renderer = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
         column = Gtk.TreeViewColumn("", renderer, markup=2, sensitive=0)
         self.play_queue_list.append_column(column)
 
@@ -832,6 +879,7 @@ class PlayerControls(Gtk.ActionBar):
         )
         self.volume_slider.set_name("volume-slider")
         self.volume_slider.set_draw_value(False)
+        self.volume_slider.connect("button-press-event", self._on_scale_button_press, None)
         self.volume_slider.connect("value-changed", self.on_volume_change)
         box.pack_start(self.volume_slider, True, True, 0)
 
