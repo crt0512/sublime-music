@@ -355,9 +355,7 @@ def confirm_queue_replacement(
         message_type=Gtk.MessageType.QUESTION,
         buttons=Gtk.ButtonsType.NONE,
         text="Replace the play queue?",
-        secondary_text=(
-            f"The play queue has {queue_length} songs. "
-        ),
+        secondary_text=(f"The play queue has {queue_length} songs. "),
     )
     dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
     dialog.add_button("Add to Queue", Gtk.ResponseType.APPLY)

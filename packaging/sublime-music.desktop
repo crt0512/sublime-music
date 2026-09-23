@@ -9,3 +9,4 @@ Exec=sublime-music
 Icon=sublime-music
 Terminal=false
 Categories=AudioVideo;Audio;Music;
+StartupWMClass=sublime-music

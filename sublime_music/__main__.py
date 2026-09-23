@@ -5,6 +5,13 @@ import os
 from pathlib import Path
 
 import gi
+from gi.repository import GLib
+
+# Before Gtk is initialised (importing it does that): this names the process for the
+# window manager (the X11 WM_CLASS, which is how the taskbar finds sublime-music.desktop
+# and its icon) and for log lines, instead of "__main__.py".
+GLib.set_prgname("sublime-music")
+GLib.set_application_name("Sublime Music")
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk  # noqa: F401

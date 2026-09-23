@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 import bleach
 
+# Ignore your IDE complaining that it cant find this. Its for MacDonalds computers.
 try:
     import osxmmkeys
 
@@ -154,6 +155,31 @@ class SublimeMusicApp(Gtk.Application):
         # Load the state for the server, if it exists.
         self.app_config.load_state()
 
+        # Configure Icons (before any window, so that the first-run dialog has them too).
+        default_icon_theme = Gtk.IconTheme.get_default()
+        for adapter in AdapterManager.available_adapters:
+            if icon_dir := adapter.get_ui_info().icon_dir:
+                default_icon_theme.append_search_path(str(icon_dir))
+
+        icon_dirs = [resolve_path("ui/icons"), resolve_path("adapters/icons")]
+        for icon_dir in icon_dirs:
+            default_icon_theme.append_search_path(str(icon_dir))
+
+        # The icon the window manager shows for our windows (on X11 the taskbar and
+        # alt-tab read it from the window itself). Loaded from the file rather than by
+        # theme name, so that it also works when nothing is installed.
+        try:
+            icon_file = str(resolve_path("ui/icons/sublime-music.svg"))
+            Gtk.Window.set_default_icon_list(
+                [
+                    GdkPixbuf.Pixbuf.new_from_file_at_size(icon_file, size, size)
+                    for size in (16, 24, 32, 48, 64, 128)
+                ]
+            )
+        except Exception:
+            logging.exception("Could not load the application icon")
+            Gtk.Window.set_default_icon_name("sublime-music")
+
         # If there is no current provider, use the first one if there are any
         # configured, and if none are configured, then show the dialog to create a new
         # one.
@@ -168,16 +194,6 @@ class SublimeMusicApp(Gtk.Application):
                     return
 
         AdapterManager.reset(self.app_config, self.on_song_download_progress)
-
-        # Configure Icons
-        default_icon_theme = Gtk.IconTheme.get_default()
-        for adapter in AdapterManager.available_adapters:
-            if icon_dir := adapter.get_ui_info().icon_dir:
-                default_icon_theme.append_search_path(str(icon_dir))
-
-        icon_dirs = [resolve_path("ui/icons"), resolve_path("adapters/icons")]
-        for icon_dir in icon_dirs:
-            default_icon_theme.append_search_path(str(icon_dir))
 
         # Windows are associated with the application when the last one is
         # closed the application shuts down.

@@ -62,8 +62,8 @@ make deb
 sudo apt install ./dist/sublime-music_*_bundled.deb
 ```
 
-The default package bundles the Python dependencies (downloaded with pip while building),
-so distribution updates cannot break the app; only Python, PyGObject/GTK and libmpv come from the system.
+The default package bundles the Python dependencies (downloaded with pip while building,
+at the versions pinned in `packaging/vendor-requirements.txt`; `make vendor-lock` refreshes those deliberately), so distribution updates cannot break the app; only Python, PyGObject/GTK and libmpv come from the system.
 
 `make deb BUNDLE=0` builds a thin package that depends on Debian's `python3-*` packages instead.
 Install it with `--no-install-recommends` if apt wants to pull in half the archive for no good reason.

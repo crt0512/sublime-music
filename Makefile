@@ -43,6 +43,8 @@ STAGE_ROOT ?= $(BUILD)/stage-$(FLAVOUR)
 DEB_ROOT   := $(BUILD)/deb-$(FLAVOUR)
 WHEEL      := dist/$(PACKAGE)-$(VERSION)-py3-none-any.whl
 VENV       := .venv
+# $(call TOOL,name): the tool from .venv when it exists, otherwise whatever is on PATH.
+TOOL        = $(if $(wildcard $(VENV)/bin/$(1)),$(VENV)/bin/$(1),$(1))
 
 LIBDIR     := $(PREFIX)/lib/$(NAME)
 ICON_SIZES := 16 22 24 32 36 48 64 72 96 128 192 512
@@ -61,7 +63,7 @@ THIN_RECOMMENDS := $(RECOMMENDS), python3-keyring
 
 SOURCES := $(shell find $(PACKAGE) -type f -not -path '*/__pycache__/*')
 
-.PHONY: help build vendor stage install uninstall deb pkg run test lint format venv clean distclean
+.PHONY: help build vendor vendor-lock stage install uninstall deb pkg run test lint format venv clean distclean
 
 help: ## Show this help
 	@echo "Sublime Music (Plus) $(VERSION), flavour: $(FLAVOUR) (BUNDLE=$(BUNDLE))"
@@ -81,11 +83,23 @@ $(WHEEL): pyproject.toml README.md LICENSE $(SOURCES)
 
 vendor: $(VENDOR)/.stamp ## Download the bundled Python dependencies into build/vendor
 
-$(VENDOR)/.stamp: Makefile
+# With the lock file every build bundles the same versions; `make vendor-lock` refreshes
+# it deliberately. Without one, whatever pip resolves today is bundled.
+VENDOR_LOCK := packaging/vendor-requirements.txt
+VENDOR_SPEC  = $(if $(wildcard $(VENDOR_LOCK)),-r $(VENDOR_LOCK),--upgrade $(VENDOR_DEPS))
+
+$(VENDOR)/.stamp: Makefile $(wildcard $(VENDOR_LOCK))
 	rm -rf $(VENDOR)
-	$(PYTHON) -m pip install --target $(VENDOR) --no-compile --upgrade $(VENDOR_DEPS)
+	$(PYTHON) -m pip install --target $(VENDOR) --no-compile $(VENDOR_SPEC)
 	rm -rf $(VENDOR)/bin
 	touch $@
+
+vendor-lock: ## Refresh packaging/vendor-requirements.txt with the newest versions of the bundled dependencies
+	rm -rf $(BUILD)/vendor-lock
+	$(PYTHON) -m pip install --target $(BUILD)/vendor-lock --no-compile --upgrade $(VENDOR_DEPS)
+	$(PYTHON) -m pip freeze --path $(BUILD)/vendor-lock > $(VENDOR_LOCK)
+	rm -rf $(BUILD)/vendor-lock
+	@echo "Locked $$(grep -c . $(VENDOR_LOCK)) packages in $(VENDOR_LOCK); run the tests, then commit it."
 
 # The installed tree, assembled under $(STAGE_ROOT)$(PREFIX). `install` copies it
 # to $(DESTDIR)$(PREFIX) and `deb` wraps it into a package.
@@ -226,19 +240,23 @@ pkg: ## macOS only: build "Sublime Music.app" and dist/SublimeMusic-<version>.pk
 # Development
 # ----------------------------------------------------------------------------
 
-run: ## Run the app from the source tree (ARGS="-m debug" for logging)
-	PYTHONPATH=. $(PYTHON) -m $(PACKAGE) $(ARGS)
+run: ## Run the app from the source tree, with .venv when it exists (ARGS="-m debug" for logging)
+	PYTHONPATH=. $(call TOOL,python) -m $(PACKAGE) $(ARGS)
 
-venv: $(VENV)/bin/activate ## Create .venv with the dev and test tools (uses the system PyGObject)
+venv: $(VENV)/.stamp ## Create .venv with the app's dependencies and the dev/test tools (PyGObject from the system)
 
-$(VENV)/bin/activate: pyproject.toml
+# The venv sees the system packages only for PyGObject (it must match the system GTK).
+# Everything else is installed into the venv itself, so a distribution package being
+# removed (apt autoremove...) cannot break `make run`, `make test` or `make lint`.
+$(VENV)/.stamp: pyproject.toml $(wildcard $(VENDOR_LOCK))
+	rm -rf $(VENV)
 	$(PYTHON) -m venv --system-site-packages $(VENV)
 	$(VENV)/bin/pip install --upgrade pip
-	$(VENV)/bin/pip install -e '.[dev,test]'
+	$(VENV)/bin/pip install --no-deps -e .
+	mkdir -p $(BUILD)
+	$(VENV)/bin/python -c 'import tomllib; e = tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]; print("\n".join(r for k in ("dev", "test") for r in e[k]))' > $(BUILD)/dev-requirements.txt
+	$(VENV)/bin/pip install --ignore-installed $(VENDOR_SPEC) -r $(BUILD)/dev-requirements.txt
 	touch $@
-
-# Use the tools from .venv when it exists, otherwise whatever is on PATH.
-TOOL = $(if $(wildcard $(VENV)/bin/$(1)),$(VENV)/bin/$(1),$(1))
 
 test: ## Run the test suite (pytest, with doctests and coverage as configured in setup.cfg)
 	PYTHONPATH=. $(call TOOL,python) -m pytest

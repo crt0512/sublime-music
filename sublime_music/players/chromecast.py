@@ -18,11 +18,17 @@ from ..adapters import AdapterManager
 from ..adapters.api_objects import Song
 from .base import Player, PlayerDeviceEvent, PlayerEvent
 
+try:
+    from pychromecast.controllers.media import MediaStatusListener
+    from pychromecast.controllers.receiver import CastStatusListener
+except ImportError:  # pychromecast before 10 has no listener base classes
+    MediaStatusListener = CastStatusListener = object  # type: ignore[misc, assignment]
+
 SERVE_FILES_KEY = "Serve Local Files to Chromecasts on the LAN"
 LAN_PORT_KEY = "LAN Server Port Number"
 
 
-class ChromecastPlayer(Player):
+class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
     name = "Chromecast"
     can_start_playing_with_no_latency = False
 
@@ -62,7 +68,7 @@ class ChromecastPlayer(Player):
         self._chromecasts: Dict[UUID, pychromecast.Chromecast] = {}
         self._current_chromecast: Optional[pychromecast.Chromecast] = None
 
-        self.chromecast_browser = None
+        self.chromecast_browser: Any = None
         self.refresh_players()
 
     def chromecast_discovered_callback(self, chromecast: Any):
@@ -73,7 +79,7 @@ class ChromecastPlayer(Player):
                 PlayerDeviceEvent.Delta.ADD,
                 type(self),
                 str(chromecast.cast_info.uuid),
-                chromecast.cast_info.friendly_name,
+                chromecast.cast_info.friendly_name or "Chromecast",
             )
         )
 
@@ -100,7 +106,7 @@ class ChromecastPlayer(Player):
                     PlayerDeviceEvent.Delta.REMOVE,
                     type(self),
                     str(id_),
-                    chromecast.cast_info.friendly_name,
+                    chromecast.cast_info.friendly_name or "Chromecast",
                 )
             )
         self._chromecasts = {}
@@ -110,10 +116,14 @@ class ChromecastPlayer(Player):
         )
 
     def set_current_device_id(self, device_id: str):
-        self._current_chromecast = self._chromecasts[UUID(device_id)]
-        self._current_chromecast.media_controller.register_status_listener(self)
-        self._current_chromecast.register_status_listener(self)
-        self._current_chromecast.wait()
+        chromecast = self._chromecasts[UUID(device_id)]
+        self._current_chromecast = chromecast
+        chromecast.media_controller.register_status_listener(self)
+        if hasattr(chromecast, "register_status_listener"):  # pychromecast before 14
+            chromecast.register_status_listener(self)
+        else:
+            chromecast.socket_client.receiver_controller.register_status_listener(self)
+        chromecast.wait()
 
     def new_cast_status(self, status: Any):
         assert self._current_chromecast
@@ -130,6 +140,12 @@ class ChromecastPlayer(Player):
         # `play_media` the next time around rather than trying to toggle the play state.
         if status.session_id is None:
             self.song_loaded = False
+
+    def new_launch_error(self, status: Any):
+        logging.warning(f"The Chromecast could not launch the receiver app: {status}")
+
+    def load_media_failed(self, queue_item_id: int, error_code: int):
+        logging.warning(f"The Chromecast could not load item {queue_item_id}: error {error_code}")
 
     time_increment_order_token = 0
 
@@ -174,6 +190,12 @@ class ChromecastPlayer(Player):
     def shutdown(self):
         if self.server_process:
             self.server_process.terminate()
+
+        if self.chromecast_browser:
+            try:
+                self.chromecast_browser.stop_discovery()
+            except Exception:
+                logging.exception("Could not stop the Chromecast discovery")
 
         try:
             assert self._current_chromecast
@@ -238,7 +260,9 @@ class ChromecastPlayer(Player):
     def get_is_muted(self) -> bool:
         if not self._current_chromecast:
             return False
-        return self._current_chromecast.volume_muted
+        # The mute state lives on the status (Chromecast.volume_muted is gone since 14).
+        status = self._current_chromecast.status
+        return bool(status and status.volume_muted)
 
     def set_muted(self, muted: bool):
         if not self._current_chromecast:
