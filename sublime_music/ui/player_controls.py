@@ -13,6 +13,7 @@ from ..config import AppConfiguration
 from ..util import resolve_path
 from . import util
 from .common import IconButton, IconToggleButton, RatingButtonBox, SpinnerImage
+from .common.rating_button import RatingButton
 from .state import RepeatType
 
 
@@ -28,6 +29,7 @@ class PlayerControls(Gtk.ActionBar):
         "song-scrub": (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (float,)),
         "volume-change": (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (float,)),
         "device-update": (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (str,)),
+        "song-starred": (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (bool,)),
         "song-clicked": (
             GObject.SignalFlags.RUN_FIRST,
             GObject.TYPE_NONE,
@@ -51,6 +53,8 @@ class PlayerControls(Gtk.ActionBar):
     cover_art_update_order_token = 0
     play_queue_update_order_token = 0
     offline_mode = False
+    updating_starred = False
+    current_starred = False
 
     def __init__(self):
         Gtk.ActionBar.__init__(self)
@@ -58,6 +62,7 @@ class PlayerControls(Gtk.ActionBar):
 
         if AdapterManager.can_get_song_rating():
             self.create_rating_buttons()
+        self.create_star_button()
         song_display = self.create_song_display()
         playback_controls = self.create_playback_controls()
         rating_play_queue_volume = self.create_rating_play_queue_volume()
@@ -115,6 +120,8 @@ class PlayerControls(Gtk.ActionBar):
         self.prev_button.set_sensitive(has_current_song)
         self.play_button.set_sensitive(has_current_song)
         self.next_button.set_sensitive(has_current_song and has_next_song)
+        self.star_button.set_visible(AdapterManager.can_set_song_starred())
+        self.star_button.set_sensitive(has_current_song)
 
         self.connecting_to_device = app_config.state.connecting_to_device
 
@@ -166,6 +173,8 @@ class PlayerControls(Gtk.ActionBar):
             )
             if AdapterManager.can_get_song_rating():
                 self.update_rating(app_config.state.current_song.user_rating)
+            if AdapterManager.can_set_song_starred():
+                self.update_starred(app_config.state.current_song.starred is not None)
 
             self.song_title.set_markup(bleach.clean(app_config.state.current_song.title))
             # TODO (#71): use walrus once MYPY gets its act together
@@ -355,6 +364,20 @@ class PlayerControls(Gtk.ActionBar):
 
     def update_rating(self, rating: int | None):
         self.rating_buttons_box.rating = rating
+
+    def update_starred(self, starred: bool):
+        self.current_starred = starred
+        self.star_button.set_icon("star-full" if starred else "star-empty")
+        self.star_button.set_tooltip_text(
+            "Unstar current song" if starred else "Star current song"
+        )
+
+    def on_star_clicked(self, button: RatingButton):
+        if self.updating_starred:
+            return
+        starred = not self.current_starred
+        self.update_starred(starred)
+        self.emit("song-starred", starred)
 
     def on_rating_clicked(self, _, rating: int):
         if AdapterManager.can_set_song_rating():
@@ -575,6 +598,9 @@ class PlayerControls(Gtk.ActionBar):
     def create_song_display(self) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
 
+        box.pack_start(self.star_button, False, False, 0)
+        self.star_button.hide()
+
         self.album_art = SpinnerImage(
             image_name="player-controls-album-artwork",
             image_size=70,
@@ -700,6 +726,15 @@ class PlayerControls(Gtk.ActionBar):
         self.rating_buttons_box.set_property("sensitive", True)
         self.rating_buttons_box.connect("rating-clicked", self.on_rating_clicked)
         self.rating_buttons_box.connect("rating-remove", self.on_rating_removed)
+
+    def create_star_button(self):
+        self.star_button = RatingButton(
+            "star-empty",
+            "Star current song",
+            valign=Gtk.Align.CENTER,
+            margin_right=8,
+        )
+        self.star_button.connect("clicked", self.on_star_clicked)
 
     def create_rating_play_queue_volume(self) -> Gtk.Box:
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)

@@ -989,6 +989,13 @@ class MainWindow(Gtk.ApplicationWindow):
     searches: Set[Result] = set()
 
     def _on_search_entry_changed(self, entry: Gtk.Entry):
+        query = entry.get_text().strip()
+        if query == self._last_search_query:
+            return
+
+        self._last_search_query = query
+        self.search_idx += 1
+
         while len(self.searches) > 0:
             search = self.searches.pop()
             if search:
@@ -998,12 +1005,6 @@ class MainWindow(Gtk.ApplicationWindow):
             self.search_popup.show_all()
             self.search_popup.popup()
 
-        query = entry.get_text().strip()
-        if query == self._last_search_query:
-            return
-
-        self._last_search_query = query
-        self.search_idx += 1
         if query == "":
             self._set_search_loading(False)
             self._clear_search_results()

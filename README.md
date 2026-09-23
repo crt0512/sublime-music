@@ -91,6 +91,7 @@ make run ARGS="-m debug"    # with debug logging
 ```
 
 ### macOS
+You probably dont want to actually use this on MacOS tbh, stability is a bit meh meh. If you really have to though heres how to :
 
 You'll need this based on your System Architecture :
 
@@ -107,11 +108,11 @@ xcode-select --install
 sudo port install python313 py313-pip py313-gobject3 gtk3 gobject-introspection adwaita-icon-theme librsvg mpv fontconfig
 ```
 
-`make pkg` on a Mac builds a self-contained `Sublime Music.app` (Python, GTK, PyGObject,
-libmpv and all Python dependencies inside, built with PyInstaller) and wraps it in
-`dist/SublimeMusic-<version>-bundled.pkg`, which installs it into `/Applications`.
-Homebrew/MacPorts is needed to build it, not to run it by default.
-If you use `make pkg BUNDLE=0` it builds a thin app that uses the Homebrew/MacPorts Python and GTK instead.
+`make pkg` on a Mac builds a self contained `Sublime Music.app` (Python, GTK, PyGObject, libmpv and all Python dependencies inside, built with PyInstaller) and wraps it in `dist/SublimeMusic-<version>-bundled.pkg`, which installs it into `/Applications`.
+
+Homebrew/MacPorts is needed to build it, not to run it in theory.
+
+If you use `make pkg BUNDLE=0` it builds a thin app that uses the Homebrew/MacPorts Python and GTK instead of bundling it in.
 
 ### Change of Build system/Method
 

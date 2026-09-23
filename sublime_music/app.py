@@ -23,6 +23,7 @@ except Exception:
 
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk
 
+Notify: Any = None
 if sys.platform == "darwin":
     # macOS builds use osascript for native notifications below; libnotify is not
     # expected to be present in the bundle.
@@ -52,6 +53,7 @@ from .adapters import (
 from .adapters.api_objects import Playlist, PlayQueue, Song
 from .config import AppConfiguration, ProviderConfiguration
 from .dbus import DBusManager, dbus_propagate
+from .macos_media import MacOSMediaSession
 from .players import PlayerDeviceEvent, PlayerEvent, PlayerManager
 from .ui import util
 from .ui.configure_provider import ConfigureProviderDialog
@@ -117,6 +119,7 @@ class SublimeMusicApp(Gtk.Application):
         self.app_config = AppConfiguration.load_from_file(config_file)
         self.dbus_manager: Optional[DBusManager] = None
         self._macos_prefers_dark_theme: Optional[bool] = None
+        self.macos_media_session: Optional[MacOSMediaSession] = None
 
         self.connect("shutdown", self.on_app_shutdown)
 
@@ -181,6 +184,16 @@ class SublimeMusicApp(Gtk.Application):
             self.tap.on("next_track", self.on_next_track)
             self.tap.on("prev_track", self.on_prev_track)
             self.tap.start()
+
+        if sys.platform == "darwin":
+            self.macos_media_session = MacOSMediaSession(
+                play=lambda: GLib.idle_add(self._macos_media_play),
+                pause=lambda: GLib.idle_add(self._macos_media_pause),
+                play_pause=lambda: GLib.idle_add(self.on_play_pause),
+                next_track=lambda: GLib.idle_add(self.on_next_track),
+                previous_track=lambda: GLib.idle_add(self.on_prev_track),
+                seek=lambda seconds: GLib.idle_add(self._macos_media_seek, seconds),
+            )
 
     def do_activate(self):
         # We only allow a single window and raise any existing ones
@@ -258,6 +271,7 @@ class SublimeMusicApp(Gtk.Application):
         self.window.player_controls.connect("device-update", self.on_device_update)
         self.window.player_controls.connect("volume-change", self.on_volume_change)
         self.window.player_controls.connect("song-rated", self.on_current_song_rated)
+        self.window.player_controls.connect("song-starred", self.on_current_song_starred)
 
         # Configure the players
         self.last_play_queue_update = timedelta(0)
@@ -273,6 +287,7 @@ class SublimeMusicApp(Gtk.Application):
                 return
 
             self.app_config.state.song_progress = timedelta(seconds=value)
+            self.update_macos_media_session()
             GLib.idle_add(
                 self.window.player_controls.update_scrubber,
                 self.app_config.state.song_progress,
@@ -1012,6 +1027,32 @@ class SublimeMusicApp(Gtk.Application):
         current_song.user_rating = rating
         AdapterManager.set_song_rating(current_song, rating).add_done_callback(on_done)
 
+    def on_current_song_starred(self, _, starred: bool):
+        if not self.window:
+            return
+        current_song = self.app_config.state.current_song
+        if not current_song:
+            return
+
+        previous_starred = current_song.starred
+
+        def on_done(future: Result):
+            if future.cancelled():
+                return
+            exception = future.exception()
+            if exception:
+                current_song.starred = previous_starred
+                self.app_config.state.current_notification = UIState.UINotification(
+                    markup="<b>Unable to star song.</b>",
+                    icon="dialog-error",
+                )
+                self.update_window()
+            elif self.window:
+                self.window.player_controls.update_starred(starred)
+
+        current_song.starred = datetime.now().astimezone() if starred else None
+        AdapterManager.set_song_starred(current_song.id, starred).add_done_callback(on_done)
+
     def on_device_update(self, _, device_id: str):
         if device_id == self.app_config.state.current_device:
             return
@@ -1043,6 +1084,31 @@ class SublimeMusicApp(Gtk.Application):
         self.app_config.state.volume = value
         self.player_manager.set_volume(self.app_config.state.volume)
         self.update_window()
+
+    def _macos_media_play(self):
+        if not self.app_config.state.playing:
+            self.on_play_pause()
+        return False
+
+    def _macos_media_pause(self):
+        if self.app_config.state.playing:
+            self.on_play_pause()
+        return False
+
+    def _macos_media_seek(self, seconds: float):
+        current_song = self.app_config.state.current_song
+        if not current_song or not current_song.duration:
+            return False
+        self.on_song_scrub(None, seconds / current_song.duration.total_seconds() * 100)
+        return False
+
+    def update_macos_media_session(self):
+        if self.macos_media_session:
+            self.macos_media_session.update(
+                self.app_config.state.current_song,
+                self.app_config.state.song_progress,
+                self.app_config.state.playing,
+            )
 
     def on_window_key_press(self, window: Gtk.Window, event: Gdk.EventKey) -> bool:
         # Need to use bitwise & here to see if CTRL is pressed.
@@ -1128,6 +1194,9 @@ class SublimeMusicApp(Gtk.Application):
             self.player_manager.pause()
             self.player_manager.shutdown()
 
+        if self.macos_media_session:
+            self.macos_media_session.shutdown()
+
         self.app_config.save()
         if self.dbus_manager:
             self.dbus_manager.shutdown()
@@ -1165,6 +1234,7 @@ class SublimeMusicApp(Gtk.Application):
         if not self.window:
             return
         logging.info(f"Updating window force={force}")
+        self.update_macos_media_session()
         GLib.idle_add(
             lambda: self.window.update(self.app_config, self.player_manager, force=force)
         )

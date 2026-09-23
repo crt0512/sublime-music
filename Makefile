@@ -59,6 +59,7 @@ ICON_SIZES := 16 22 24 32 36 48 64 72 96 128 192 512
 # against the system's GTK, so it always comes from the system: python3-gi on
 # Debian, pygobject3 from Homebrew on macOS). Keep in sync with pyproject.toml.
 VENDOR_DEPS := bleach bottle dataclasses-json peewee pychromecast python-dateutil mpv requests semver thefuzz keyring
+PYI_MACOS_DEPS := $(if $(filter Darwin,$(shell uname)),pyobjc-framework-MediaPlayer,)
 
 # What both flavours need from the system.
 SYSTEM_DEPENDS := python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, gir1.2-glib-2.0, libmpv2
@@ -121,7 +122,7 @@ $(PYI_VENV)/.stamp: pyproject.toml $(wildcard $(VENDOR_LOCK))
 	rm -rf $(PYI_VENV)
 	$(PYI_PYTHON) -m venv --system-site-packages $(PYI_VENV)
 	$(PYI_VENV)/bin/pip install --upgrade pip
-	$(PYI_VENV)/bin/pip install --ignore-installed $(VENDOR_SPEC) "pyinstaller >=6, <7"
+	$(PYI_VENV)/bin/pip install --ignore-installed $(VENDOR_SPEC) $(PYI_MACOS_DEPS) "pyinstaller >=6, <7"
 	@$(PYI_VENV)/bin/python -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' \
 	    || { echo "PyGObject with GTK 3 is not available to $(PYI_PYTHON) (python3-gi on Debian, pygobject3 from Homebrew)"; exit 1; }
 	touch $@

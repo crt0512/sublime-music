@@ -56,6 +56,21 @@ if always_error := os.environ.get("NETWORK_ALWAYS_ERROR"):
     NETWORK_ALWAYS_ERROR = True
 
 
+def _ping_process_context() -> multiprocessing.context.BaseContext:
+    """
+    Return the multiprocessing context for the Subsonic ping worker.
+
+    The ping worker updates multiprocessing.Value fields owned by the adapter. macOS
+    defaults to spawn, which is less reliable for the already-initialized adapter state
+    in the frozen app; using fork preserves the behavior this background ping logic was
+    written around.
+    """
+    try:
+        return multiprocessing.get_context("fork")
+    except ValueError:
+        return multiprocessing.get_context()
+
+
 class ServerError(Exception):
     def __init__(self, status_code: int, message: str):  # noqa: B042 (never pickled)
         self.status_code = status_code
@@ -245,8 +260,16 @@ class SubsonicAdapter(Adapter):
         # TODO (#112): support XML?
 
     def initial_sync(self):
-        # Try to ping the server five times using exponential backoff (2^5 = 32s).
-        self._exponential_backoff(5)
+        # Try once synchronously so the first UI update after initial sync reflects the
+        # real connection state. This runs inside AdapterManager's executor, not on the
+        # GTK thread. If the immediate ping fails, keep retrying in the background using
+        # exponential backoff.
+        try:
+            # typing doesn't support multiprocessing.Value very well
+            self._last_ping_timestamp.value = 0.0  # type: ignore
+            self._set_ping_status(timeout=2)
+        except Exception:
+            self._exponential_backoff(5)
 
     def shutdown(self):
         if self._ping_process:
@@ -262,7 +285,10 @@ class SubsonicAdapter(Adapter):
         if self._ping_process:
             self._ping_process.terminate()
 
-        self._ping_process = multiprocessing.Process(target=self._check_ping_thread, args=(n,))
+        self._ping_process = _ping_process_context().Process(
+            target=self._check_ping_thread,
+            args=(n,),
+        )
         self._ping_process.start()
 
     def _check_ping_thread(self, n: int):
