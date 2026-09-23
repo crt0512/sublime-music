@@ -288,7 +288,7 @@ def show_song_popover(
     ]
 
     for item in menu_items:
-        if type(item) == tuple:
+        if type(item) is tuple:
             el, fn = item
             el.connect("clicked", fn)
             el.get_style_context().add_class("menu-button")
@@ -337,6 +337,43 @@ def show_song_popover(
 
     popover.popup()
     popover.show_all()
+
+
+def confirm_queue_replacement(
+    parent: Optional[Gtk.Window],
+    queue_length: int,
+    on_replace: Callable[[], None],
+    on_add: Callable[[], None],
+) -> Gtk.MessageDialog:
+    """
+    Asks whether to replace the play queue with what was clicked, add it to the queue, or
+    do nothing. Whether this is asked at all is a setting.
+    """
+    dialog = Gtk.MessageDialog(
+        transient_for=parent,
+        modal=True,
+        message_type=Gtk.MessageType.QUESTION,
+        buttons=Gtk.ButtonsType.NONE,
+        text="Replace the play queue?",
+        secondary_text=(
+            f"The play queue has {queue_length} songs. "
+        ),
+    )
+    dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+    dialog.add_button("Add to Queue", Gtk.ResponseType.APPLY)
+    dialog.add_button("Replace Queue", Gtk.ResponseType.OK)
+    dialog.set_default_response(Gtk.ResponseType.OK)
+
+    def on_response(_: Gtk.Dialog, response: int):
+        dialog.destroy()
+        if response == Gtk.ResponseType.OK:
+            on_replace()
+        elif response == Gtk.ResponseType.APPLY:
+            on_add()
+
+    dialog.connect("response", on_response)
+    dialog.show_all()
+    return dialog
 
 
 def async_callback(

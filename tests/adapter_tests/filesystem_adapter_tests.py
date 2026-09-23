@@ -1,9 +1,9 @@
-import json
 import shutil
+import time
 from dataclasses import asdict
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Generator, Iterable, Tuple, cast
+from typing import Any, Dict, Generator, Iterable, List, Tuple, cast
 
 import pytest
 from peewee import SelectQuery
@@ -12,9 +12,10 @@ from sublime_music.adapters import (
     AlbumSearchQuery,
     CacheMissError,
     SongCacheStatus,
+    SongQuery,
     api_objects as SublimeAPI,
 )
-from sublime_music.adapters.filesystem import FilesystemAdapter
+from sublime_music.adapters.filesystem import FilesystemAdapter, models
 from sublime_music.adapters.filesystem.models import Artist, Directory
 from sublime_music.adapters.subsonic import api_objects as SubsonicAPI
 
@@ -24,7 +25,7 @@ MOCK_ALBUM_ART2 = MOCK_DATA_FILES.joinpath("album-art2.png")
 MOCK_ALBUM_ART3 = MOCK_DATA_FILES.joinpath("album-art3.png")
 MOCK_SONG_FILE = MOCK_DATA_FILES.joinpath("test-song.mp3")
 MOCK_SONG_FILE2 = MOCK_DATA_FILES.joinpath("test-song2.mp3")
-MOCK_ALBUM_ART_HASH = "5d7bee4f3fe25b18cd2a66f1c9767e381bc64328"
+MOCK_ALBUM_ART_HASH = "3ac0c5267c92c9da4a4beb552f45ff3198780986"
 MOCK_ALBUM_ART2_HASH = "031a8a1ca01f64f851a22d5478e693825a00fb23"
 MOCK_ALBUM_ART3_HASH = "46a8af0f8fe370e59202a545803e8bbb3a4a41ee"
 MOCK_SONG_FILE_HASH = "fe12d0712dbfd6ff7f75ef3783856a7122a78b0a"
@@ -110,7 +111,15 @@ def verify_songs(
     assert len(actual_songs) == len(expected_songs)
     for actual, song in zip(actual_songs, expected_songs):
         for k, v in asdict(song).items():
-            if k in ("_genre", "_album", "_artist", "album_id", "artist_id"):
+            if k in (
+                "_genre",
+                "_album",
+                "_artist",
+                "album_id",
+                "artist_id",
+                "_album_artists",
+                "_genres",
+            ):
                 continue
             print(k, "->", v)  # noqa: T201
 
@@ -294,9 +303,9 @@ def test_cache_cover_art(cache_adapter: FilesystemAdapter):
 
     # After ingesting the data, reading from the cache should give the exact same file.
     cache_adapter.ingest_new_data(KEYS.COVER_ART_FILE, "pl_test1", MOCK_ALBUM_ART)
-    with open(cache_adapter.get_cover_art_uri("pl_test1", "file", size=300), "wb+") as cached:
-        with open(MOCK_ALBUM_ART, "wb+") as expected:
-            assert cached.read() == expected.read()
+    cached = Path(cache_adapter.get_cover_art_uri("pl_test1", "file", size=300))
+    assert cached == cache_adapter.cover_art_dir.joinpath(MOCK_ALBUM_ART_HASH)
+    assert cached.read_bytes() == MOCK_ALBUM_ART.read_bytes()
 
 
 def test_invalidate_playlist(cache_adapter: FilesystemAdapter):
@@ -942,6 +951,27 @@ def test_caching_invalidate_artist(cache_adapter: FilesystemAdapter):
         assert e.partial_data == stale_cover_art_2
 
 
+def _subsonic_child(song: SubsonicAPI.Song) -> Dict[str, Any]:
+    """
+    The JSON a Subsonic server sends for ``song`` inside a directory listing.
+    (dataclasses-json cannot encode a Song since 0.6: two fields share the ``artist`` key.)
+    """
+    child = {
+        "id": song.id,
+        "title": song.title,
+        "parent": song.parent_id,
+        "album": song._album,
+        "albumId": song.album_id,
+        "artist": song._artist,
+        "artistId": song.artist_id,
+        "duration": song.duration.total_seconds() if song.duration else None,
+        "path": song.path,
+        "coverArt": song.cover_art,
+        "genre": song._genre,
+    }
+    return {k: v for k, v in child.items() if v is not None}
+
+
 def test_get_music_directory(cache_adapter: FilesystemAdapter):
     dir_id = "d1"
     with pytest.raises(CacheMissError):
@@ -955,7 +985,7 @@ def test_get_music_directory(cache_adapter: FilesystemAdapter):
             dir_id,
             title="foo",
             parent_id=None,
-            _children=[json.loads(s.to_json()) for s in MOCK_SUBSONIC_SONGS[:2]]
+            _children=[_subsonic_child(s) for s in MOCK_SUBSONIC_SONGS[:2]]
             + [
                 {
                     "id": "542",
@@ -1064,8 +1094,10 @@ def test_caching_get_artists_keeps_artists_referenced_by_songs(cache_adapter: Fi
         [SubsonicAPI.ArtistAndArtistInfo(id="1", name="test1", album_count=3)],
     )
 
-    # Artist 2 is unreferenced, so it is gone. Artist "art2" is still needed by song 1.
-    assert {a.id for a in cache_adapter.get_artists()} == {"1", "art2"}
+    # Artist 2 is unreferenced, so it is gone. Artist "art2" is still needed by song 1, but
+    # only the index is listed.
+    assert {a.id for a in cache_adapter.get_artists()} == {"1"}
+    assert Artist.get_by_id("art2").name == "foo"
     song = cache_adapter.get_song_details("1")
     assert song.artist is not None
     assert (song.artist.id, song.artist.name) == ("art2", "foo")
@@ -1093,3 +1125,279 @@ def test_stale_parent_sentinel_is_migrated(tmp_path: Path):
     assert Directory.get_by_id("al-1").parent_id == "root"
     assert Directory.get_by_id("al-2").parent_id == "al-1"
     second.shutdown()
+
+
+# Song library
+# ======================================================================================
+def _library_songs(count: int) -> List[SubsonicAPI.Song]:
+    songs = []
+    for i in range(count):
+        songs.append(
+            SubsonicAPI.Song(
+                f"tr-{i}",
+                title=f"Song {str(i).zfill(5)}",
+                parent_id=f"al-{i % 7}",
+                _album=f"Album {i % 7}",
+                album_id=f"al-{i % 7}",
+                _artist=f"Artist {i % 3}",
+                artist_id=f"ar-{i % 3}",
+                _genre=("Pop", "Rock", None)[i % 3],
+                path=f"Artist {i % 3}/Album {i % 7}/{str(i).zfill(5)}.flac",
+                size=1000 + i,
+                duration=timedelta(seconds=100 + i),
+                cover_art=f"tr-{i}",
+                track=i % 12 + 1,
+                year=1990 + i % 30,
+                bit_rate=320,
+                suffix="flac",
+                created=datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(days=i),
+                play_count=i % 5,
+                user_rating=(i % 6) or None,
+                starred=datetime(2024, 6, 1, tzinfo=timezone.utc) if i % 10 == 0 else None,
+            )
+        )
+    return songs
+
+
+def test_song_library_not_synced(cache_adapter: FilesystemAdapter):
+    assert cache_adapter.song_library_last_synced() is None
+    with pytest.raises(CacheMissError):
+        cache_adapter.get_song_library(SongQuery())
+
+
+def test_song_library_sync_and_query(cache_adapter: FilesystemAdapter):
+    songs = _library_songs(5000)
+    start = time.time()
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, songs)
+    assert time.time() - start < 10, "bulk ingestion must be fast"
+    assert cache_adapter.song_library_last_synced() is not None
+
+    # Synced songs are complete: their details are served from the cache.
+    details = cache_adapter.get_song_details("tr-3")
+    assert (details.title, details.artist.name if details.artist else None) == (
+        "Song 00003",
+        "Artist 0",
+    )
+
+    library = cache_adapter.get_song_library(SongQuery())
+    assert len(library) == 5000
+    # Default sort: date added, newest first.
+    assert library[0].id == "tr-4999" and library[-1].id == "tr-0"
+    by_artist = cache_adapter.get_song_library(
+        SongQuery(sort_column="artist", sort_descending=False)
+    )
+    assert [s.artist for s in by_artist[:3]] == ["Artist 0"] * 3
+    first = next(s for s in library if s.id == "tr-3")
+    assert (first.title, first.album, first.artist, first.genre) == (
+        "Song 00003",
+        "Album 3",
+        "Artist 0",
+        "Pop",
+    )
+    assert first.duration == timedelta(seconds=103)
+    assert first.created == datetime(2024, 1, 4, tzinfo=timezone.utc)
+    assert (first.bit_rate, first.suffix, first.play_count, first.cover_art) == (
+        320,
+        "flac",
+        3,
+        "tr-3",
+    )
+    assert first.cache_status == SongCacheStatus.NOT_CACHED
+
+    # Sorting, with empty values last.
+    by_genre = cache_adapter.get_song_library(
+        SongQuery(sort_column="genre", sort_descending=False)
+    )
+    assert by_genre[0].genre == "Pop" and by_genre[-1].genre is None
+    by_year_desc = cache_adapter.get_song_library(
+        SongQuery(sort_column="year", sort_descending=True)
+    )
+    assert by_year_desc[0].year == 2019 and by_year_desc[-1].year == 1990
+
+    # Presets.
+    starred = cache_adapter.get_song_library(SongQuery(preset=SongQuery.Preset.STARRED))
+    assert len(starred) == 500 and all(s.starred for s in starred)
+    played = cache_adapter.get_song_library(
+        SongQuery(
+            preset=SongQuery.Preset.MOST_PLAYED, sort_column="play_count", sort_descending=True
+        )
+    )
+    assert len(played) == 4000 and played[0].play_count == 4
+    rated = cache_adapter.get_song_library(SongQuery(preset=SongQuery.Preset.TOP_RATED))
+    assert all(s.user_rating for s in rated)
+    years = cache_adapter.get_song_library(
+        SongQuery(preset=SongQuery.Preset.YEAR_RANGE, year_range=(2000, 2001))
+    )
+    assert years and {s.year for s in years} == {2000, 2001}
+
+    # Filtering.
+    titled = cache_adapter.get_song_library(
+        SongQuery(filter_text="song 0004", filter_column="title")
+    )
+    assert len(titled) == 10 and all(s.title.startswith("Song 0004") for s in titled)
+    anywhere = cache_adapter.get_song_library(SongQuery(filter_text="artist 1"))
+    assert len(anywhere) == 1667 and all(s.artist == "Artist 1" for s in anywhere)
+    with pytest.raises(ValueError):
+        cache_adapter.get_song_library(SongQuery(sort_column="nope"))
+
+
+def test_song_library_resync_keeps_cached_files_and_drops_vanished(
+    cache_adapter: FilesystemAdapter,
+):
+    songs = _library_songs(20)
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, songs)
+
+    # Download one song "by hand".
+    cache_adapter.ingest_new_data(KEYS.SONG_FILE, "tr-1", (None, str(MOCK_SONG_FILE), None))
+    assert cache_adapter.get_cached_statuses(["tr-1"])["tr-1"] == SongCacheStatus.CACHED
+
+    # Sync again: the song's title changed on the server, one song vanished.
+    songs[1].title = "Renamed"
+    del songs[5]
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, songs)
+
+    library = {s.id: s for s in cache_adapter.get_song_library(SongQuery())}
+    assert len(library) == 19 and "tr-5" not in library
+    assert library["tr-1"].title == "Renamed"
+    assert library["tr-1"].cache_status == SongCacheStatus.CACHED
+    assert cache_adapter.get_cached_statuses(["tr-1"])["tr-1"] == SongCacheStatus.CACHED
+    assert cache_adapter.get_song_file_uri("tr-1", "file").startswith("file://")
+
+
+def test_song_library_migration_adds_columns(tmp_path: Path):
+    first = FilesystemAdapter({}, tmp_path, is_cache=True)
+    # Pretend the cache was created by an older version without the library columns.
+    for column in ("created", "play_count", "size"):
+        models.database.execute_sql(f"ALTER TABLE song DROP COLUMN {column}")
+    first.shutdown()
+
+    second = FilesystemAdapter({}, tmp_path, is_cache=True)
+    columns = {c.name for c in models.database.get_columns("song")}
+    assert {"created", "play_count", "size"} <= columns
+    second.ingest_new_data(KEYS.SONGS, None, _library_songs(3))
+    assert len(second.get_song_library(SongQuery())) == 3
+    second.shutdown()
+
+
+def test_song_starred_ingestion(cache_adapter: FilesystemAdapter):
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, _library_songs(3))
+    assert cache_adapter.get_song_details("tr-1").starred is None
+
+    cache_adapter.ingest_new_data(KEYS.SONG_STARRED, "tr-1", True)
+    assert cache_adapter.get_song_details("tr-1").starred is not None
+    starred = cache_adapter.get_song_library(SongQuery(preset=SongQuery.Preset.STARRED))
+    assert {s.id for s in starred} == {"tr-0", "tr-1"}  # tr-0 is starred by _library_songs
+
+    cache_adapter.ingest_new_data(KEYS.SONG_STARRED, "tr-1", False)
+    assert cache_adapter.get_song_details("tr-1").starred is None
+
+
+def test_song_played_ingestion_and_resync(cache_adapter: FilesystemAdapter):
+    songs = _library_songs(3)
+    for song in songs:
+        song.play_count = None
+        song.played = None
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, songs)
+
+    cache_adapter.ingest_new_data(KEYS.SONG_PLAYED, "tr-1", None)
+    cache_adapter.ingest_new_data(KEYS.SONG_PLAYED, "tr-1", None)
+    played = cache_adapter.get_song_details("tr-1")
+    assert played.play_count == 2 and played.played is not None
+
+    # A server which doesn't report plays leaves the local count alone...
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, songs)
+    assert cache_adapter.get_song_details("tr-1").play_count == 2
+    # ...and one which does wins.
+    songs[1].play_count = 7
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, songs)
+    assert cache_adapter.get_song_details("tr-1").play_count == 7
+
+
+def test_artist_index_flag_is_migrated(tmp_path: Path):
+    first = FilesystemAdapter({}, tmp_path, is_cache=True)
+    first.ingest_new_data(
+        KEYS.ARTISTS,
+        None,
+        [SubsonicAPI.ArtistAndArtistInfo(id="1", name="indexed", album_count=3)],
+    )
+    first.ingest_new_data(KEYS.SONG, "1", MOCK_SUBSONIC_SONGS[1])  # adds artist "art2"
+    models.database.execute_sql("ALTER TABLE artist DROP COLUMN in_index")
+    first.shutdown()
+
+    # An older cache: the flag is guessed from the album count until the next index
+    # request, which the migration forces by invalidating the cached index.
+    second = FilesystemAdapter({}, tmp_path, is_cache=True)
+    with pytest.raises(CacheMissError) as e:
+        second.get_artists()
+    assert [a.id for a in cast(CacheMissError, e.value).partial_data] == ["1"]
+    second.shutdown()
+
+
+def test_album_list_bulk_ingestion(cache_adapter: FilesystemAdapter):
+    # A fully ingested album keeps what the list doesn't provide.
+    cache_adapter.ingest_new_data(
+        KEYS.ALBUM,
+        "a1",
+        SubsonicAPI.Album(
+            id="a1", name="Full", song_count=9, year=1999, _artist="X", artist_id="x"
+        ),
+    )
+    query = AlbumSearchQuery(AlbumSearchQuery.Type.ALPHABETICAL_BY_NAME)
+    albums = [SubsonicAPI.Album(id="a1", name="Full", _artist="X", artist_id="x", cover_art="c1")]
+    albums += [
+        SubsonicAPI.Album(
+            id=f"b{i}",
+            name=f"Album {i:04}",
+            _artist="Y",
+            artist_id="y",
+            _genre="Pop",
+            year=2000 + i % 20,
+            cover_art=f"cb{i}",
+        )
+        for i in range(2000)
+    ]
+    albums.append(SubsonicAPI.Album(id=None, name="No id", _artist="Nameless", artist_id=None))
+    start = time.time()
+    cache_adapter.ingest_new_data(KEYS.ALBUMS, query.strhash(), albums)
+    assert time.time() - start < 5, "the list must be ingested in bulk"
+
+    result = list(cache_adapter.get_albums(query))
+    assert len(result) == 2002
+    assert [a.id for a in result[:2]] == ["a1", "b0"]
+    assert (result[-1].id or "").startswith("invalid:")
+    full = cache_adapter.get_album("a1")
+    assert (full.song_count, full.year, full.cover_art) == (9, 1999, "c1")
+    assert (artist := result[1].artist) and (genre := result[1].genre)
+    assert (artist.name, genre.name, result[1].year) == ("Y", "Pop", 2000)
+
+
+def test_empty_cached_cover_art_is_a_cache_miss(cache_adapter: FilesystemAdapter):
+    # Before empty responses were rejected, an empty download could be cached as valid
+    # cover art; it must not be served (the image loader can't do anything with it).
+    cache_adapter.ingest_new_data(KEYS.COVER_ART_FILE, "pl_empty", MOCK_ALBUM_ART)
+    cached = cache_adapter.get_cover_art_uri("pl_empty", "file", size=300)
+    open(cached, "wb").close()
+
+    with pytest.raises(CacheMissError):
+        cache_adapter.get_cover_art_uri("pl_empty", "file", size=300)
+
+
+def test_cached_album_songs_without_track_numbers(cache_adapter: FilesystemAdapter):
+    # Untagged files have no track number; ordering the album's songs must not compare
+    # None with an int (this crashed the album details after a song library sync).
+    cache_adapter.ingest_new_data(
+        KEYS.ALBUM,
+        "a1",
+        SubsonicAPI.Album(
+            id="a1",
+            name="foo",
+            songs=[
+                SubsonicAPI.Song("3", title="Three", _album="foo", album_id="a1", track=2),
+                SubsonicAPI.Song("4", title="Untagged", _album="foo", album_id="a1"),
+                SubsonicAPI.Song("5", title="One", _album="foo", album_id="a1", track=1),
+            ],
+        ),
+    )
+
+    album = cache_adapter.get_album("a1")
+    assert [s.title for s in album.songs or []] == ["Untagged", "One", "Three"]

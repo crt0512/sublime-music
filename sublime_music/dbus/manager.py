@@ -152,10 +152,10 @@ class DBusManager:
         if isinstance(value, GLib.Variant):
             return value
 
-        if type(value) == tuple:
+        if type(value) is tuple:
             return GLib.Variant(*value)
 
-        if type(value) == dict:
+        if type(value) is dict:
             return GLib.Variant(
                 "a{sv}",
                 {k: DBusManager.to_variant(v) for k, v in value.items()},
@@ -234,12 +234,14 @@ class DBusManager:
                 "LoopStatus": state.repeat_type.as_mpris_loop_status(),
                 "Rate": 1.0,
                 "Shuffle": state.shuffle_on,
-                "Metadata": self.get_mpris_metadata(
-                    state.current_song_index,
-                    state.play_queue,
-                )
-                if state.current_song
-                else {},
+                "Metadata": (
+                    self.get_mpris_metadata(
+                        state.current_song_index,
+                        state.play_queue,
+                    )
+                    if state.current_song
+                    else {}
+                ),
                 "Volume": 0.0 if state.is_muted else state.volume / 100,
                 "Position": (
                     "x",

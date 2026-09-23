@@ -4,7 +4,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Generator, List, Tuple
+from typing import Any, Dict, Generator, List, Tuple
 
 import pytest
 from dateutil.tz import tzutc
@@ -28,6 +28,9 @@ def adapter(tmp_path: Path):
 
     adapter = SubsonicAdapter(config, tmp_path)
     adapter._is_mock = True
+    # The availability flag is shared between adapter instances; start from "unknown".
+    adapter._server_available.value = False  # type: ignore
+    adapter._last_ping_timestamp.value = 0.0  # type: ignore
 
     yield adapter
     adapter.shutdown()
@@ -235,6 +238,10 @@ def test_get_playlist_details(adapter: SubsonicAdapter):
                 )
             ),
             disc_number=1,
+            bit_rate=256,
+            suffix="m4a",
+            created=datetime(2020, 3, 27, 5, 17, 7, tzinfo=tzutc()),
+            play_count=20,
         )
 
 
@@ -564,3 +571,140 @@ def test_directory_parent_sentinel_means_root():
     assert SubsonicAPI.Directory.from_dict({"id": "al-2"}).parent_id == "root"
     assert SubsonicAPI.Directory.from_dict({"id": "al-3", "parent": "al-2"}).parent_id == "al-2"
     assert SubsonicAPI.Directory.from_dict({"id": "root"}).parent_id is None
+
+
+# Song library
+# ======================================================================================
+def _search_response(*ids: str) -> str:
+    songs = [{"id": i, "title": f"Song {i}", "artist": "A", "artistId": "ar-1"} for i in ids]
+    return json.dumps(
+        {
+            "subsonic-response": {
+                "status": "ok",
+                "version": "1.15.0",
+                "searchResult3": {"song": songs},
+            }
+        }
+    )
+
+
+def test_get_all_songs_lists_the_whole_library(adapter: SubsonicAdapter):
+    adapter._SONG_LIST_PAGE_SIZE = 2
+    adapter._set_mock_data(
+        iter(
+            [
+                _search_response("tr-1"),  # the probe
+                _search_response("tr-1", "tr-2"),
+                _search_response("tr-3", "tr-4"),
+                _search_response("tr-5"),  # short page: the end
+            ]
+        )
+    )
+    progress = []
+    songs = adapter.get_all_songs(lambda done, total: progress.append((done, total)))
+    assert [s.id for s in songs] == ["tr-1", "tr-2", "tr-3", "tr-4", "tr-5"]
+    assert progress == [(2, None), (4, None), (5, None)]
+
+
+def test_get_all_songs_falls_back_to_walking_albums(adapter: SubsonicAdapter):
+    error = json.dumps(
+        {
+            "subsonic-response": {
+                "status": "failed",
+                "version": "1.15.0",
+                "error": {"code": 10, "message": "no"},
+            }
+        }
+    )
+    album_list = json.dumps(
+        {
+            "subsonic-response": {
+                "status": "ok",
+                "version": "1.15.0",
+                "albumList2": {
+                    "album": [{"id": "al-1", "name": "One"}, {"id": "al-2", "name": "Two"}]
+                },
+            }
+        }
+    )
+    empty_album_list = json.dumps(
+        {"subsonic-response": {"status": "ok", "version": "1.15.0", "albumList2": {}}}
+    )
+
+    def album(album_id: str, *song_ids: str) -> str:
+        songs = [
+            {"id": i, "title": f"Song {i}", "album": "x", "albumId": album_id} for i in song_ids
+        ]
+        return json.dumps(
+            {
+                "subsonic-response": {
+                    "status": "ok",
+                    "version": "1.15.0",
+                    "album": {"id": album_id, "name": "x", "song": songs},
+                }
+            }
+        )
+
+    adapter._set_mock_data(
+        iter(
+            [
+                error,  # the probe fails: this server cannot list everything
+                album_list,
+                empty_album_list,
+                album("al-1", "tr-1", "tr-2"),
+                album("al-2", "tr-3"),
+            ]
+        )
+    )
+    progress = []
+    songs = adapter.get_all_songs(lambda done, total: progress.append((done, total)))
+    assert [s.id for s in songs] == ["tr-1", "tr-2", "tr-3"]
+    assert progress == [(1, 2), (2, 2)]
+
+
+def test_song_fast_from_dict_matches_the_decoder():
+    children: List[Dict[str, Any]] = [
+        {
+            "id": 202,
+            "title": "What a Beautiful Name",
+            "parent": "318",
+            "album": "Single",
+            "albumId": "48",
+            "artist": "Hillsong Worship",
+            "artistId": "38",
+            "track": 1,
+            "discNumber": 0,
+            "year": 2016,
+            "genre": "Christian & Gospel",
+            "genres": [{"name": "Christian & Gospel"}, {"name": "Worship"}],
+            "displayAlbumArtist": "Hillsong",
+            "albumArtists": [{"id": "38", "name": "Hillsong Worship"}],
+            "coverArt": "318",
+            "size": 8381640,
+            "duration": 238,
+            "bitRate": 256,
+            "suffix": "m4a",
+            "path": "a/b.m4a",
+            "created": "2020-03-27T05:17:07.000Z",
+            "starred": "2026-09-22T21:19:53.354670347Z",
+            "played": "2024-01-02T03:04:05+01:00",
+            "playCount": 20,
+            "userRating": 4,
+        },
+        {"id": "tr-1", "title": "Bare"},
+        {"id": "tr-2", "name": "Named like a directory entry", "albumArtists": [{"name": "AA"}]},
+    ]
+    for child in children:
+        assert SubsonicAPI.Song.fast_from_dict(child) == SubsonicAPI.Song.from_dict(child)
+
+
+def test_set_song_starred_uses_star_and_unstar(adapter: SubsonicAdapter):
+    calls = []
+
+    def record(url: str, **params: Any) -> None:
+        calls.append((url.rsplit("/", 1)[-1], params))
+
+    adapter._get_json = record  # type: ignore
+    adapter.set_song_starred("tr-1", True)
+    adapter.set_song_starred("tr-1", False)
+    assert calls == [("star.view", {"id": "tr-1"}), ("unstar.view", {"id": "tr-1"})]

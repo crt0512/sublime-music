@@ -1,9 +1,9 @@
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import Enum
-from typing import Any, Callable, Dict, Optional, Set, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
 
-from ..adapters import AlbumSearchQuery
+from ..adapters import AlbumSearchQuery, SongQuery
 from ..adapters.api_objects import Genre, Song
 from ..util import this_decade
 
@@ -95,6 +95,10 @@ class UIState:
 
     active_playlist_id: Optional[str] = None
 
+    # State for the Songs tab.
+    song_query: SongQuery = field(default_factory=SongQuery)
+    song_columns: Optional[List[str]] = None  # visible columns in order; None: the defaults
+
     def __getstate__(self):
         state = self.__dict__.copy()
         del state["song_stream_cache_progress"]
@@ -115,7 +119,11 @@ class UIState:
         self.available_players = {pt: set() for pt in PlayerManager.available_player_types}
 
     def migrate(self):
-        pass
+        # Fields added after this state file was written get their defaults.
+        if "song_query" not in self.__dict__:
+            self.song_query = SongQuery()
+        if "song_columns" not in self.__dict__:
+            self.song_columns = None
 
     _current_song: Optional[Song] = None
 

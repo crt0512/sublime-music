@@ -4,7 +4,9 @@ from .adapter_base import (
     CacheMissError,
     CachingAdapter,
     ConfigurationStore,
+    LibrarySong,
     SongCacheStatus,
+    SongQuery,
     UIInfo,
 )
 from .configure_server_form import ConfigParamDescriptor, ConfigureServerForm
@@ -20,8 +22,10 @@ __all__ = (
     "ConfigurationStore",
     "ConfigureServerForm",
     "DownloadProgress",
+    "LibrarySong",
     "Result",
     "SearchResult",
     "SongCacheStatus",
+    "SongQuery",
     "UIInfo",
 )

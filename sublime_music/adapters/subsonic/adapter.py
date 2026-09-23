@@ -11,7 +11,7 @@ import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from time import sleep
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union, cast
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union, cast
 from urllib.parse import urlencode, urlparse
 
 import requests
@@ -29,7 +29,7 @@ from .. import (
     UIInfo,
     api_objects as API,
 )
-from .api_objects import Directory, Response
+from .api_objects import Directory, Response, Song as SubsonicSong
 
 try:
     import gi
@@ -57,7 +57,7 @@ if always_error := os.environ.get("NETWORK_ALWAYS_ERROR"):
 
 
 class ServerError(Exception):
-    def __init__(self, status_code: int, message: str):
+    def __init__(self, status_code: int, message: str):  # noqa: B042 (never pickled)
         self.status_code = status_code
         super().__init__(message)
 
@@ -319,6 +319,7 @@ class SubsonicAdapter(Adapter):
     can_get_song_rating = True
     can_scrobble_song = True
     can_search = True
+    can_get_all_songs = True
     can_stream = True
     can_update_playlist = True
 
@@ -343,6 +344,10 @@ class SubsonicAdapter(Adapter):
     @property
     def can_set_song_rating(self) -> bool:
         return self.version_at_least("1.6.0")
+
+    @property
+    def can_set_song_starred(self) -> bool:
+        return self.version_at_least("1.8.0")
 
     _schemes = None
 
@@ -423,7 +428,7 @@ class SubsonicAdapter(Adapter):
                 logging.info(f"REQUEST_DELAY enabled. Pausing for {delay} seconds")
                 sleep(delay)
                 if timeout:
-                    if type(timeout) == tuple:
+                    if type(timeout) is tuple:
                         if delay > cast(Tuple[float, float], timeout)[0]:
                             raise TimeoutError("DUMMY TIMEOUT ERROR")
                     else:
@@ -494,19 +499,18 @@ class SubsonicAdapter(Adapter):
         logging.info(f"[FINISH] get: {url}")
         return result
 
-    def _get_json(
+    def _get_response_dict(
         self,
         url: str,
         timeout: Union[float, Tuple[float, float], None] = None,
         is_exponential_backoff_ping: bool = False,
         **params: Union[None, str, datetime, int, Sequence[int], Sequence[str]],
-    ) -> Response:
+    ) -> Dict[str, Any]:
         """
         Make a get request to a *Sonic REST API. Handle all types of errors including
         *Sonic ``<error>`` responses.
 
-        :returns: a dictionary of the subsonic response.
-        :raises Exception: needs some work
+        :returns: the ``subsonic-response`` object of the response, as a dictionary.
         """
         result = self._get(
             url,
@@ -529,7 +533,26 @@ class SubsonicAdapter(Adapter):
         self._version.value = subsonic_response["version"].encode()  # type: ignore
 
         logging.debug(f"Response from {url}: {subsonic_response}")
-        return Response.from_dict(subsonic_response)
+        return subsonic_response
+
+    def _get_json(
+        self,
+        url: str,
+        timeout: Union[float, Tuple[float, float], None] = None,
+        is_exponential_backoff_ping: bool = False,
+        **params: Union[None, str, datetime, int, Sequence[int], Sequence[str]],
+    ) -> Response:
+        """
+        Like :meth:`_get_response_dict`, decoded into a :class:`Response`.
+        """
+        return Response.from_dict(
+            self._get_response_dict(
+                url,
+                timeout=timeout,
+                is_exponential_backoff_ping=is_exponential_backoff_ping,
+                **params,
+            )
+        )
 
     # Helper Methods for Testing
     _get_mock_data: Any = None
@@ -549,7 +572,7 @@ class SubsonicAdapter(Adapter):
                 return json.loads(self._content)
 
         def get_mock_data() -> Any:
-            if type(data) == Exception:
+            if type(data) is Exception:
                 raise data
             if hasattr(data, "__next__"):
                 if d := next(data):
@@ -767,6 +790,9 @@ class SubsonicAdapter(Adapter):
             self._make_url("setRating"), id=song_id, rating=rating if rating is not None else 0
         )
 
+    def set_song_starred(self, song_id: str, starred: bool):
+        self._get_json(self._make_url("star" if starred else "unstar"), id=song_id)
+
     def save_play_queue(
         self,
         song_ids: Sequence[str],
@@ -782,6 +808,70 @@ class SubsonicAdapter(Adapter):
             current=song_ids[current_song_index] if current_song_index is not None else None,
             position=math.floor(position.total_seconds() * 1000) if position else None,
         )
+
+    # Song Library
+    # ==================================================================================
+    _SONG_LIST_PAGE_SIZE = 1000
+
+    def get_all_songs(
+        self, on_progress: Callable[[int, Optional[int]], None] = lambda done, total: None
+    ) -> Sequence[API.Song]:
+        songs = self._list_all_songs(on_progress)
+        if songs is None:
+            logging.info("This server does not list all songs; walking the albums instead.")
+            songs = self._walk_all_albums(on_progress)
+        return songs
+
+    def _search_songs(self, query: str, count: int, offset: int) -> List[API.Song]:
+        # Whole-library listings go through the fast song constructor: the generic
+        # decoder needs almost half a second per thousand songs.
+        response = self._get_response_dict(
+            self._make_url("search3"),
+            query=query,
+            songCount=count,
+            songOffset=offset,
+            albumCount=0,
+            artistCount=0,
+        )
+        result = response.get("searchResult3") or {}
+        return [SubsonicSong.fast_from_dict(child) for child in result.get("song") or []]
+
+    def _list_all_songs(
+        self, on_progress: Callable[[int, Optional[int]], None]
+    ) -> Optional[List[API.Song]]:
+        """
+        Lists the whole library through ``search3`` with an empty query, which gonic and
+        Navidrome support. Returns ``None`` if this server does not.
+        """
+        try:
+            if not self._search_songs("", count=1, offset=0):
+                return None
+        except ServerError:
+            return None
+
+        songs: List[API.Song] = []
+        offset = 0
+        while True:
+            page = self._search_songs("", count=self._SONG_LIST_PAGE_SIZE, offset=offset)
+            songs.extend(page)
+            on_progress(len(songs), None)
+            if len(page) < self._SONG_LIST_PAGE_SIZE:
+                return songs
+            offset += self._SONG_LIST_PAGE_SIZE
+
+    def _walk_all_albums(
+        self, on_progress: Callable[[int, Optional[int]], None]
+    ) -> List[API.Song]:
+        """
+        The fallback: every album of the server, one request each. Slower, same result.
+        """
+        albums = self.get_albums(AlbumSearchQuery(AlbumSearchQuery.Type.ALPHABETICAL_BY_NAME))
+        songs: List[API.Song] = []
+        for i, album in enumerate(albums):
+            if album.id:
+                songs.extend(self.get_album(album.id).songs or [])
+            on_progress(i + 1, len(albums))
+        return songs
 
     def search(self, query: str) -> API.SearchResult:
         result = self._get_json(self._make_url("search3"), query=query).search_result

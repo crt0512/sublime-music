@@ -4,7 +4,7 @@ import random
 import shutil
 import sys
 from concurrent.futures import Future
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
@@ -46,10 +46,36 @@ from .adapters.api_objects import Playlist, PlayQueue, Song
 from .config import AppConfiguration, ProviderConfiguration
 from .dbus import DBusManager, dbus_propagate
 from .players import PlayerDeviceEvent, PlayerEvent, PlayerManager
+from .ui import util
 from .ui.configure_provider import ConfigureProviderDialog
 from .ui.main import MainWindow
 from .ui.state import RepeatType, UIState
 from .util import resolve_path
+
+
+def song_library_sync_due(
+    last_synced: Optional[datetime], interval_minutes: int, now: datetime
+) -> bool:
+    """
+    Whether the automatic song library sync should run now.
+
+    >>> now = datetime(2026, 9, 23, 12, 0)
+    >>> song_library_sync_due(None, 0, now)
+    False
+    >>> song_library_sync_due(None, 30, now)
+    True
+    >>> song_library_sync_due(datetime(2026, 9, 23, 11, 45), 30, now)
+    False
+    >>> song_library_sync_due(datetime(2026, 9, 23, 11, 15), 30, now)
+    True
+    """
+    if interval_minutes <= 0:
+        return False
+    if last_synced is None:
+        return True
+    if last_synced.tzinfo is not None:
+        last_synced = last_synced.astimezone().replace(tzinfo=None)
+    return now - last_synced >= timedelta(minutes=interval_minutes)
 
 
 class SublimeMusicApp(Gtk.Application):
@@ -72,7 +98,7 @@ class SublimeMusicApp(Gtk.Application):
 
         def add_action(name: str, fn: Callable, parameter_type: str | None = None):
             """Registers an action with the application."""
-            if type(parameter_type) == str:
+            if type(parameter_type) is str:
                 parameter_type = GLib.VariantType(parameter_type)
             action = Gio.SimpleAction.new(name, parameter_type)
             action.connect("activate", fn)
@@ -94,6 +120,7 @@ class SublimeMusicApp(Gtk.Application):
         # Navigation actions.
         add_action("play-next", self.on_play_next, parameter_type="as")
         add_action("add-to-queue", self.on_add_to_queue, parameter_type="as")
+        add_action("clear-play-queue", self.on_clear_play_queue)
         add_action("go-to-album", self.on_go_to_album, parameter_type="s")
         add_action("go-to-artist", self.on_go_to_artist, parameter_type="s")
         add_action("browse-to", self.browse_to, parameter_type="s")
@@ -300,6 +327,7 @@ class SublimeMusicApp(Gtk.Application):
             self.app_config.player_config,
         )
         GLib.timeout_add(10000, check_if_connected)
+        GLib.timeout_add_seconds(60, self.check_song_library_sync)
 
         # Update after Adapter Initial Sync
         def after_initial_sync(_):
@@ -559,6 +587,10 @@ class SublimeMusicApp(Gtk.Application):
 
         for k, v in state_updates.items():
             setattr(self.app_config.state, k, v)
+        if state_updates.keys() & {"song_query", "song_columns"}:
+            # Preferences rather than transient state: keep them even if the app doesn't
+            # get to shut down cleanly.
+            self.app_config.save()
         self.update_window(force=force)
 
     def on_notification_closed(self, _):
@@ -799,6 +831,23 @@ class SublimeMusicApp(Gtk.Application):
         metadata: Dict[str, Any],
     ):
         song_queue = tuple(song_queue)
+        queue_length = len(self.app_config.state.play_queue)
+        if (
+            self.app_config.confirm_queue_replacement
+            and queue_length > self.app_config.queue_replacement_warning_size
+        ):
+            util.confirm_queue_replacement(
+                self.window,
+                queue_length,
+                on_replace=lambda: self._play_clicked_songs(song_index, song_queue, metadata),
+                on_add=lambda: self.on_add_to_queue(None, song_queue[song_index:]),
+            )
+            return
+        self._play_clicked_songs(song_index, song_queue, metadata)
+
+    def _play_clicked_songs(
+        self, song_index: int, song_queue: Tuple[str, ...], metadata: Dict[str, Any]
+    ):
         # Reset the play queue so that we don't ever revert back to the
         # previous one.
         old_play_queue = song_queue
@@ -851,6 +900,18 @@ class SublimeMusicApp(Gtk.Application):
             self.save_play_queue()
 
     @dbus_propagate()
+    def on_clear_play_queue(self, *args):
+        """Stops playback and empties the play queue, however long it is."""
+        if self.app_config.state.playing:
+            self.on_play_pause()
+        self.player_manager.reset()
+        self.app_config.state.play_queue = ()
+        self.app_config.state.old_play_queue = ()
+        self.app_config.state.current_song_index = -1
+        self.app_config.state.song_progress = timedelta(0)
+        self.update_window()
+
+    @dbus_propagate()
     def on_song_scrub(self, _, scrub_value: float):
         if not self.app_config.state.current_song or not self.window:
             return
@@ -886,7 +947,7 @@ class SublimeMusicApp(Gtk.Application):
             """Update the UI after a failed or successful rating"""
             if future.cancelled():
                 return
-            exception = future.exception(timeout=1.0)
+            exception = future.exception()
             if exception:
                 self.app_config.state.current_notification = UIState.UINotification(
                     markup="<b>Unable to rate song.</b>",
@@ -967,6 +1028,21 @@ class SublimeMusicApp(Gtk.Application):
     def on_song_download_progress(self, song_id: str, progress: DownloadProgress):
         assert self.window
         GLib.idle_add(self.window.update_song_download_progress, song_id, progress)
+
+    def check_song_library_sync(self) -> bool:
+        """Runs the automatic song library sync when it is due (see the settings)."""
+        if (
+            self.window
+            and not self.app_config.offline_mode
+            and AdapterManager.can_sync_song_library()
+            and song_library_sync_due(
+                AdapterManager.song_library_last_synced(),
+                self.app_config.song_library_sync_interval_minutes,
+                datetime.now(),
+            )
+        ):
+            self.window.songs_panel.start_sync()
+        return True  # keep the timer running
 
     def on_app_shutdown(self, app: "SublimeMusicApp"):
         self.exiting = True

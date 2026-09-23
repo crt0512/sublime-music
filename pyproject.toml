@@ -8,7 +8,7 @@ authors = [
     {name = "Sumner Evans", email = "inquiries@sumnerevans.com"}
 ]
 dynamic = ["version", "description"]
-readme = "README.rst"
+readme = "README.md"
 requires-python = ">=3.10,<4"
 license = {file = "LICENSE"}
 keywords = ["airsonic", "music", "GTK", "chromecast", "subsonic"]
@@ -25,7 +25,6 @@ dependencies = [
     "bleach",
     "bottle",
     "dataclasses-json",
-    "Levenshtein",
     "peewee",
     "pychromecast",
     "PyGObject",
@@ -38,27 +37,22 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "black",
-    "flake8",
+    # Pinned to major versions so that `make lint` gives the same answer next year.
+    "black >=26, <27",
+    "flake8 >=7, <8",
     "flake8-annotations",
     "flake8-bugbear",
     "flake8-comprehensions",
     "flake8-pep3101",
     "flake8-print",
-    "flit",
-    "isort",
-    "mypy",
-    "pip-tools",
-    "pre-commit",
-    "requirements-parser",
-    "termcolor",
+    "isort >=6",
+    # Newer mypy releases reject the dataclasses-json decorator stack and the peewee
+    # query patterns this code relies on; 1.2 is what it was written against.
+    "mypy >=1.2, <1.3",
     "types-bleach",
-    "types-peewee",
+    "types-peewee >=4, <5",
     "types-python-dateutil",
-    "types-pyyaml",
     "types-requests",
-    "types-tabulate",
-    "types-termcolor",
 ]
 doc = [
     "docutils <0.17",
@@ -89,4 +83,4 @@ line_length = 99
 
 [tool.black]
 line-length = 99
-target-version = ["py38"]
+target-version = ["py310"]

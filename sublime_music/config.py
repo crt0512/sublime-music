@@ -75,7 +75,7 @@ class ProviderConfiguration:
 
 
 def encode_providers(
-    providers_dict: Dict[str, Union[ProviderConfiguration, Dict[str, Any]]]
+    providers_dict: Dict[str, Union[ProviderConfiguration, Dict[str, Any]]],
 ) -> Dict[str, Dict[str, Any]]:
     return {
         id_: (
@@ -88,7 +88,7 @@ def encode_providers(
 
 
 def decode_providers(
-    providers_dict: Dict[str, Dict[str, Any]]
+    providers_dict: Dict[str, Dict[str, Any]],
 ) -> Dict[str, ProviderConfiguration]:
     from sublime_music.adapters import AdapterManager
 
@@ -141,6 +141,14 @@ class AppConfiguration(DataClassJsonMixin):
     download_on_stream: bool = True  # also download when streaming a song
     prefetch_amount: int = 3
     concurrent_download_limit: int = 5
+
+    # Play queue settings: ask before a double-click replaces a play queue which is longer
+    # than ``queue_replacement_warning_size`` songs.
+    confirm_queue_replacement: bool = True
+    queue_replacement_warning_size: int = 1
+
+    # Song library: sync it automatically every so many minutes (0 = only by hand).
+    song_library_sync_interval_minutes: int = 0
 
     # Deprecated. These have also been renamed to avoid using them elsewhere in the app.
     _sol: bool = field(default=True, metadata=config(field_name="serve_over_lan"))

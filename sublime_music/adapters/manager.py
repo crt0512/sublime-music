@@ -7,7 +7,7 @@ import tempfile
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -38,7 +38,9 @@ from .adapter_base import (
     AlbumSearchQuery,
     CacheMissError,
     CachingAdapter,
+    LibrarySong,
     SongCacheStatus,
+    SongQuery,
 )
 from .api_objects import Album, Artist, Directory, Genre, Playlist, PlayQueue, SearchResult, Song
 from .filesystem import FilesystemAdapter
@@ -75,7 +77,7 @@ class DownloadError(Exception):
         opposed to a transient failure), in which case asking again is pointless.
     """
 
-    def __init__(self, message: str, not_found: bool = False):
+    def __init__(self, message: str, not_found: bool = False):  # noqa: B042 (never pickled)
         super().__init__(message)
         self.not_found = not_found
 
@@ -98,6 +100,35 @@ def _describe_error_document(document: Any) -> Tuple[str, bool]:
         return f"unexpected JSON response: {str(document)[:200]}", False
     # Subsonic error code 70 means "the requested data was not found".
     return f"server error {code}: {error.get('message')}", code == 70
+
+
+def _has_image_magic(head: bytes) -> bool:
+    r"""
+    Whether the first bytes of a file identify a common image format.
+
+    >>> _has_image_magic(b"\xff\xd8\xff\xe0\x00\x10JFIF")
+    True
+    >>> _has_image_magic(b"\x89PNG\r\n\x1a\n")
+    True
+    >>> _has_image_magic(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+    True
+    >>> _has_image_magic(b"<html><body>Bad Gateway</body></html>")
+    False
+    >>> _has_image_magic(b"")
+    False
+    """
+    return (
+        head.startswith(b"\xff\xd8\xff")
+        or head.startswith(b"\x89PNG\r\n\x1a\n")
+        or head.startswith((b"GIF87a", b"GIF89a"))
+        or (head.startswith(b"RIFF") and head[8:12] == b"WEBP")
+        or head.startswith(b"BM")
+    )
+
+
+def _looks_like_image(filename: Path) -> bool:
+    with open(filename, "rb") as f:
+        return _has_image_magic(f.read(12))
 
 
 class Result(Generic[T]):
@@ -431,12 +462,17 @@ class AdapterManager:
         id: str,
         before_download: Callable[[], None] | None = None,
         expected_size: int | None = None,
+        expect_image: bool = False,
         **result_args,
     ) -> Result[str]:
         """
         Create a function to download the given URI to a temporary file, and return the
         filename. The returned function will spin-loop if the resource is already being
         downloaded to prevent multiple requests for the same download.
+
+        :param expect_image: fail the download unless the server sent an image, so that
+            whatever else it sent (an error page, an empty body) never gets cached as
+            cover art.
         """
         download_cancelled = False
 
@@ -506,12 +542,22 @@ class AdapterManager:
                     # Then, for each of the blocks, give 5 seconds to download (which
                     # should be more than enough for 1 KiB).
                     request = requests.get(uri, stream=True, timeout=(10, 5))
-                    if "json" in request.headers.get("Content-Type", ""):
+                    content_type = request.headers.get("Content-Type", "")
+                    if "json" in content_type:
                         try:
                             document = request.json()
                         except ValueError:
                             document = request.text
                         raise DownloadError(*_describe_error_document(document))
+                    if not request.ok or "text/html" in content_type:
+                        # An error page (from the server, or from a proxy in front of
+                        # it) is not the file. Caching it would show a broken image, or
+                        # break playback, until the cache entry is refreshed.
+                        raise DownloadError(
+                            f"HTTP {request.status_code} {request.reason} "
+                            f"({content_type or 'no content type'})",
+                            request.status_code == 404,
+                        )
 
                     total_size = int(request.headers.get("Content-Length", 0))
                     if expected_size_exists:
@@ -551,6 +597,18 @@ class AdapterManager:
                                             current_bytes=total_consumed,
                                         ),
                                     )
+
+                    if total_consumed == 0:
+                        # An empty response is not a file either; the server just has
+                        # nothing for this id.
+                        raise DownloadError("empty response from the server", True)
+                    if expect_image and not (
+                        content_type.startswith("image/")
+                        or _looks_like_image(download_tmp_filename)
+                    ):
+                        raise DownloadError(
+                            f"not an image ({content_type or 'no content type'})", False
+                        )
 
                     # Everything succeeded.
                     if expected_size_exists:
@@ -868,13 +926,13 @@ class AdapterManager:
         result = AdapterManager._create_ground_truth_result("set_song_rating", song.id, rating)
         if AdapterManager._instance and AdapterManager._instance.caching_adapter:
 
-            def on_done(future: Future):
+            def on_done(future: Result):
                 """
                 Update cache when things went well
 
                 The API call doesn't return the updated object
                 """
-                if future.cancelled() or future.exception(timeout=1.0):
+                if future.cancelled() or future.exception() is not None:
                     return
                 # To make mypy happy
                 assert AdapterManager._instance
@@ -965,6 +1023,7 @@ class AdapterManager:
                 ),
                 cover_art_id,
                 before_download,
+                expect_image=True,
                 default_value=existing_filename,
             )
 
@@ -1223,9 +1282,91 @@ class AdapterManager:
         )
 
     @staticmethod
-    def scrobble_song(song: Song):
+    def can_set_song_starred() -> bool:
+        return AdapterManager._ground_truth_can_do("set_song_starred")
+
+    @staticmethod
+    def set_song_starred(song_id: str, starred: bool) -> Result[None]:
         assert AdapterManager._instance
-        AdapterManager._create_ground_truth_result("scrobble_song", song)
+        result = AdapterManager._create_ground_truth_result("set_song_starred", song_id, starred)
+        if AdapterManager._instance.caching_adapter:
+            caching_adapter: CachingAdapter = AdapterManager._instance.caching_adapter
+
+            def on_done(future: Result):
+                # The API call doesn't return the updated object: update the cache here.
+                if future.cancelled() or future.exception() is not None:
+                    return
+                caching_adapter.ingest_new_data(
+                    CachingAdapter.CachedDataKey.SONG_STARRED, song_id, starred
+                )
+
+            result.add_done_callback(on_done)
+        return result
+
+    # Song Library
+    @staticmethod
+    def can_sync_song_library() -> bool:
+        return (
+            AdapterManager._instance is not None
+            and AdapterManager._instance.caching_adapter is not None
+            and AdapterManager._ground_truth_can_do("get_all_songs")
+        )
+
+    @staticmethod
+    def sync_song_library(
+        on_progress: Callable[[int, Optional[int]], None] = lambda done, total: None,
+    ) -> Result[None]:
+        """
+        Fetches the whole song library from the ground truth adapter and mirrors it in the
+        caching adapter. Only ever call this on the user's request (or their schedule).
+        """
+        assert AdapterManager._instance
+        assert AdapterManager._instance.caching_adapter
+        caching_adapter: CachingAdapter = AdapterManager._instance.caching_adapter
+        ground_truth_adapter = AdapterManager._instance.ground_truth_adapter
+
+        def do_sync():
+            if AdapterManager._offline_mode and ground_truth_adapter.is_networked:
+                raise Exception("Cannot sync the song library in offline mode.")
+            songs = ground_truth_adapter.get_all_songs(on_progress)
+            caching_adapter.ingest_new_data(CachingAdapter.CachedDataKey.SONGS, None, songs)
+
+        return Result(do_sync)
+
+    @staticmethod
+    def get_song_library(query: SongQuery) -> Result[Sequence[LibrarySong]]:
+        """
+        The mirrored song library. This never touches the network: the result fails with a
+        :class:`CacheMissError` if the library has not been synced yet.
+        """
+        assert AdapterManager._instance
+        assert AdapterManager._instance.caching_adapter
+        caching_adapter: CachingAdapter = AdapterManager._instance.caching_adapter
+        return Result(lambda: caching_adapter.get_song_library(query))
+
+    @staticmethod
+    def song_library_last_synced() -> Optional[datetime]:
+        if not AdapterManager._instance or not AdapterManager._instance.caching_adapter:
+            return None
+        return AdapterManager._instance.caching_adapter.song_library_last_synced()
+
+    @staticmethod
+    def scrobble_song(song: Song) -> Result[None]:
+        assert AdapterManager._instance
+        result = AdapterManager._create_ground_truth_result("scrobble_song", song)
+        if AdapterManager._instance.caching_adapter:
+            caching_adapter: CachingAdapter = AdapterManager._instance.caching_adapter
+
+            def on_done(future: Result):
+                # Keep the cached play count fresh between syncs of the song library.
+                if future.cancelled() or future.exception() is not None:
+                    return
+                caching_adapter.ingest_new_data(
+                    CachingAdapter.CachedDataKey.SONG_PLAYED, song.id, None
+                )
+
+            result.add_done_callback(on_done)
+        return result
 
     @staticmethod
     def get_artists(
@@ -1363,9 +1504,9 @@ class AdapterManager:
             ).result()
             directory.children = AdapterManager.sort_by_ignored_articles(
                 directory.children,
-                key=lambda c: cast(Directory, c).name or ""
-                if hasattr(c, "name")
-                else cast(Song, c).title,
+                key=lambda c: (
+                    cast(Directory, c).name or "" if hasattr(c, "name") else cast(Song, c).title
+                ),
                 use_ground_truth_adapter=force,
             )
             return directory
@@ -1478,12 +1619,14 @@ class AdapterManager:
 
         cached_statuses = AdapterManager._instance.caching_adapter.get_cached_statuses(song_ids)
         return [
-            SongCacheStatus.DOWNLOADING
-            if (
-                song_id in AdapterManager.current_download_ids
-                and song_id not in AdapterManager._cancelled_song_ids
+            (
+                SongCacheStatus.DOWNLOADING
+                if (
+                    song_id in AdapterManager.current_download_ids
+                    and song_id not in AdapterManager._cancelled_song_ids
+                )
+                else cached_statuses[song_id]
             )
-            else cached_statuses[song_id]
             for song_id in song_ids
         ]
 

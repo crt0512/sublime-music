@@ -1,3 +1,36 @@
+v0.13.0
+=======
+
+This is the first release of the *Sublime Music (Plus)* fork, made after upstream
+reached end of maintenance.
+
+**Python Version Requirements:** Python 3.10 or later, tested with 3.13.
+
+**Dependency Changes:** ``deepdiff`` and ``Levenshtein`` are no longer dependencies.
+
+**Packaging Changes:** 
+
+The project is now built with a ``Makefile`` in the repository root (``make deb``, ``make install``, ``make uninstall``, ``make build``, ``make pkg``).
+Packages bundle the pure-Python dependencies by default; set ``BUNDLE=0`` for a thin package that uses the distribution's Python packages. 
+The athodeNix flake, pre-commit, GitHub Actions and pip-tools lock files are gone.
+
+**Features**
+
+* Songs tab: the whole library in one sortable, filterable table with presets, configurable columns, star/rating in the table, a Sync button, and optional timed auto-sync (Settings > Song Library).
+* Play queue: a "Clear Queue" button, and an optional confirmation (replace / add / cancel) when playing over a queue longer than a configurable size (Settings > Play Queue).
+* Albums tab: switching albums animates the details closed and open again.
+
+**Bug Fixes**
+
+* Fixed a ``RecursionError`` flood from ``deepdiff`` with modern PyGObject.
+* Fixed playback with mpv 0.38 and later (``loadfile`` arguments).
+* Fixed ``python -m sublime_music`` doing nothing.
+* Fixed downloads racing on servers where a song and its cover art share an id, and partial files being left behind after failed downloads.
+* Fixed error pages, empty responses and other non-images being cached as cover art.
+* Fixed the artist index deleting artists that songs and albums still refer to.
+* Fixed album details crashing on albums with an untagged track.
+* Large speed-ups in the Albums, Artists and Browse tabs (bulk cache ingestion, fewer widget rebuilds).
+
 v0.12.0
 =======
 

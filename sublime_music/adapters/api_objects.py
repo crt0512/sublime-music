@@ -1,6 +1,7 @@
 """
 Defines the objects that are returned by adapter methods.
 """
+
 import abc
 import logging
 from datetime import datetime, timedelta
@@ -98,6 +99,15 @@ class Song(abc.ABC):
     size: Optional[int]
     user_rating: Optional[int]
     starred: Optional[datetime]
+
+    # Extra fields used by the song library. Not every adapter or server provides them.
+    album_artist: Optional[str]
+    genres: Optional[str]
+    bit_rate: Optional[int]
+    suffix: Optional[str]
+    created: Optional[datetime]
+    played: Optional[datetime]
+    play_count: Optional[int]
 
 
 class Playlist(abc.ABC):

@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Union
+from typing import TYPE_CHECKING, Any, List, Optional, Union, cast
 
 from peewee import (
     AutoField,
@@ -12,6 +12,8 @@ from peewee import (
     TextField,
     prefetch,
 )
+
+from sublime_music.adapters import api_objects as API
 
 from .sqlite_extensions import (
     CacheConstantsField,
@@ -31,15 +33,21 @@ class _ForeignKeyOrNoneAccessor(ForeignKeyAccessor):
             return None
 
 
-class NullableForeignKeyField(ForeignKeyField):
-    """
-    A foreign key (declare it with ``null=True``) which reads as ``None`` when the
-    referenced row no longer exists, instead of raising ``DoesNotExist``. Referenced rows
-    can disappear underneath a cached object, for example when the artist index is
-    re-ingested.
-    """
+if TYPE_CHECKING:
+    # For the type checker it is a plain foreign key (the stubs type those by target
+    # model); the subclass below only changes what happens when the row is missing.
+    NullableForeignKeyField = ForeignKeyField
+else:
 
-    accessor_class = _ForeignKeyOrNoneAccessor
+    class NullableForeignKeyField(ForeignKeyField):
+        """
+        A foreign key (declare it with ``null=True``) which reads as ``None`` when the
+        referenced row no longer exists, instead of raising ``DoesNotExist``. Referenced
+        rows can disappear underneath a cached object, for example when the artist index
+        is re-ingested.
+        """
+
+        accessor_class = _ForeignKeyOrNoneAccessor
 
 
 # Models
@@ -82,13 +90,16 @@ class Artist(BaseModel):
     biography = TextField(null=True)
     music_brainz_id = TextField(null=True)
     last_fm_url = TextField(null=True)
+    # Part of the server's artist index (what the Artists tab lists). Artists only known
+    # through songs or albums (e.g. track artists) are cached too, but not listed.
+    in_index = BooleanField(null=True)
 
     _artist_image_url = NullableForeignKeyField(CacheInfo, null=True)
 
     @property
     def artist_image_url(self) -> Optional[str]:
         try:
-            return self._artist_image_url.file_id
+            return cast(Any, self._artist_image_url).file_id
         except Exception:
             return None
 
@@ -130,7 +141,7 @@ class Album(BaseModel):
     @property
     def cover_art(self) -> Optional[str]:
         try:
-            return self._cover_art.file_id
+            return cast(Any, self._cover_art).file_id
         except Exception:
             return None
 
@@ -145,7 +156,8 @@ class Album(BaseModel):
                 albums,
                 artists,
             ),
-            key=lambda s: (s.disc_number or 1, s.track),
+            # Untagged tracks (no number) sort first; None can't be compared.
+            key=lambda s: (s.disc_number or 1, s.track or 0),
         )
 
 
@@ -161,7 +173,7 @@ class IgnoredArticle(BaseModel):
 class Directory(BaseModel):
     id = TextField(unique=True, primary_key=True)
     name = TextField(null=True)
-    parent_id = TextField(null=True)
+    parent_id = TextField(null=True, index=True)
 
     _children: Optional[List[Union["Directory", "Song"]]] = None
 
@@ -183,7 +195,7 @@ class Song(BaseModel):
     title = TextField()
     duration = DurationField(null=True)
 
-    parent_id = TextField(null=True)
+    parent_id = TextField(null=True, index=True)
     album = NullableForeignKeyField(Album, null=True, backref="_songs")
     artist = NullableForeignKeyField(Artist, null=True)
     genre = NullableForeignKeyField(Genre, null=True, backref="songs")
@@ -194,14 +206,16 @@ class Song(BaseModel):
     @property
     def size(self) -> Optional[int]:
         try:
-            return self.file.size
+            if (file_size := cast(Any, self.file).size) is not None:
+                return file_size
         except Exception:
-            return None
+            pass
+        return self._size
 
     @property
     def path(self) -> Optional[str]:
         try:
-            return self.file.path
+            return cast(Any, self.file).path
         except Exception:
             return None
 
@@ -210,7 +224,7 @@ class Song(BaseModel):
     @property
     def cover_art(self) -> Optional[str]:
         try:
-            return self._cover_art.file_id
+            return cast(Any, self._cover_art).file_id
         except Exception:
             return None
 
@@ -219,6 +233,16 @@ class Song(BaseModel):
     year = IntegerField(null=True)
     user_rating = IntegerField(null=True)
     starred = TzDateTimeField(null=True)
+
+    # Extra fields used by the song library (see FilesystemAdapter._ingest_song_library).
+    album_artist = TextField(null=True)
+    genres = TextField(null=True)
+    bit_rate = IntegerField(null=True)
+    _size = IntegerField(null=True, column_name="size")
+    suffix = TextField(null=True)
+    created = TzDateTimeField(null=True)
+    played = TzDateTimeField(null=True)
+    play_count = IntegerField(null=True)
 
 
 class Playlist(BaseModel):
@@ -245,7 +269,7 @@ class Playlist(BaseModel):
     @property
     def cover_art(self) -> Optional[str]:
         try:
-            return self._cover_art.file_id
+            return cast(Any, self._cover_art).file_id
         except Exception:
             return None
 
@@ -273,6 +297,11 @@ class Version(BaseModel):
         major, minor, patch = map(int, semver.split("."))
         Version.update(major=major, minor=minor, patch=patch)
 
+
+# The cached rows stand in for the API objects (see the ``children`` property above), so
+# let ``isinstance`` say so without the cost of evaluating that property.
+API.Directory.register(Directory)
+API.Song.register(Song)
 
 ALL_TABLES = (
     Album,

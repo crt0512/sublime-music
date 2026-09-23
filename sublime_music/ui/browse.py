@@ -348,7 +348,7 @@ class MusicDirectoryList(Gtk.Box):
             children_ids.append(c.id)
             children.append(c)
 
-            if not hasattr(c, "children"):
+            if not isinstance(c, API.Directory):
                 song_ids.append(c.id)
 
         if force:
@@ -357,7 +357,7 @@ class MusicDirectoryList(Gtk.Box):
 
             songs = []
             for el in children:
-                if hasattr(el, "children"):
+                if isinstance(el, API.Directory):
                     new_directories_store.append(
                         MusicDirectoryList.DrilldownElement(cast(API.Directory, el))
                     )

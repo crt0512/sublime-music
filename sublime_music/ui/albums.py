@@ -501,6 +501,9 @@ class AlbumsGrid(Gtk.Overlay):
 
     currently_selected_index: Optional[int] = None
     currently_selected_id: Optional[str] = None
+    # A reflow waiting for the details of another album to finish closing, see
+    # reflow_grids: (force_reload_from_master, selected_index, models).
+    _pending_reflow: Optional[Tuple[bool, int, Optional[List["_AlbumModel"]]]] = None
     sort_dir: str = ""
     page_size: int = 30
     page: int = 0
@@ -571,6 +574,9 @@ class AlbumsGrid(Gtk.Overlay):
 
         self.detail_box.pack_start(Gtk.Box(), True, True, 0)
         self.detail_box_revealer.add(self.detail_box)
+        self.detail_box_revealer.connect(
+            "notify::child-revealed", self._on_detail_box_child_revealed
+        )
         grid_detail_grid_box.add(self.detail_box_revealer)
 
         self.grid_bottom = create_flowbox(vexpand=True)
@@ -651,6 +657,30 @@ class AlbumsGrid(Gtk.Overlay):
                 models=self.current_models,
             )
             self.spinner.hide()
+
+        if (
+            force_grid_reload_from_master
+            and not use_ground_truth_adapter
+            and self.current_models
+            and self.latest_applied_order_ratchet == order_token
+        ):
+            # Only the page (or its size, or the direction) changed: the albums are the
+            # same, so don't read and wrap all of them again.
+            self.emit(
+                "num-pages-changed",
+                math.ceil(len(self.current_models) / self.page_size),
+            )
+            do_update_grid(
+                next(
+                    (
+                        i
+                        for i, m in enumerate(self.current_models)
+                        if m.id == self.currently_selected_id
+                    ),
+                    None,
+                )
+            )
+            return
 
         def reload_store(f: Result[Iterable[API.Album]]):
             # Don't override more recent results
@@ -768,10 +798,24 @@ class AlbumsGrid(Gtk.Overlay):
             self.items_per_row = new_items_per_row
             self.detail_box_inner.set_size_request(self.items_per_row * 230 - 10, -1)
 
+            # The albums are the same; only where the fold between the two grids sits can
+            # change. Rebuilding every tile here made the first page appear twice.
             self.reflow_grids(
-                force_reload_from_master=True,
+                force_reload_from_master=False,
                 selected_index=self.currently_selected_index,
             )
+
+    def _on_detail_box_child_revealed(self, revealer: Gtk.Revealer, _):
+        if not revealer.get_child_revealed() and self._pending_reflow is not None:
+            # Closed: now open the album that was clicked (in an idle so that this
+            # doesn't run inside the revealer's own property notification).
+            GLib.idle_add(self._run_pending_reflow)
+
+    def _run_pending_reflow(self) -> bool:
+        if (pending := self._pending_reflow) is not None:
+            self._pending_reflow = None
+            self.reflow_grids(*pending)
+        return False
 
     # Helper Methods
     # =========================================================================
@@ -839,6 +883,21 @@ class AlbumsGrid(Gtk.Overlay):
             if page_of_selected_index != self.page:
                 self.emit("refresh-window", {"album_page": page_of_selected_index}, False)
                 return
+
+        if (
+            not force_reload_from_master
+            and selected_index is not None
+            and selected_index != self.currently_selected_index
+            and (self.detail_box_revealer.get_reveal_child() or self._pending_reflow is not None)
+        ):
+            # Another album's details are open: close them first. The rest of this reflow
+            # (moving the fold, opening the new album's details) runs once they are closed,
+            # see _on_detail_box_child_revealed. Later calls replace the pending reflow.
+            self._pending_reflow = (force_reload_from_master, selected_index, models)
+            self.detail_box_revealer.set_reveal_child(False)
+            return
+        self._pending_reflow = None
+
         page_offset = self.page_size * self.page
 
         # Calculate the look-at window.
@@ -911,7 +970,11 @@ class AlbumsGrid(Gtk.Overlay):
                 self.detail_box_inner.remove(c)
 
             model = self.list_store_top[relative_selected_index]
-            detail_element = AlbumWithSongs(model.album, cover_art_size=300)
+            # This may run after the window update that would otherwise pass the app
+            # config on (see _pending_reflow), so the details need the offline mode now.
+            detail_element = AlbumWithSongs(
+                model.album, cover_art_size=300, offline_mode=self.offline_mode
+            )
             detail_element.connect(
                 "song-clicked",
                 lambda _, *args: self.emit("song-clicked", *args),

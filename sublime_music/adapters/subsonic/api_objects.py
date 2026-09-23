@@ -24,6 +24,25 @@ encoder_functions = {
     timedelta: (lambda t: t.total_seconds() if t else None),
 }
 
+
+def _fast_int(value: Any) -> Optional[int]:
+    return int(value) if value else None
+
+
+def _fast_timedelta(value: Any) -> Optional[timedelta]:
+    return timedelta(seconds=float(value)) if value else None
+
+
+def _fast_datetime(value: Any) -> Optional[datetime]:
+    """Like the ``datetime`` decoder above, but an order of magnitude faster."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return parser.parse(value)
+
+
 for type_, translation_function in decoder_functions.items():
     dataclasses_json.cfg.global_config.decoders[type_] = translation_function
     dataclasses_json.cfg.global_config.decoders[
@@ -193,10 +212,65 @@ class Song(SublimeAPI.Song, DataClassJsonMixin):
     user_rating: Optional[int] = None
     starred: Optional[datetime] = None
 
+    # Extra fields used by the song library. Not every server sends all of them.
+    album_artist: Optional[str] = field(
+        default=None, metadata=config(field_name="displayAlbumArtist")
+    )
+    _album_artists: List[Dict[str, Any]] = field(
+        default_factory=list, metadata=config(field_name="albumArtists")
+    )
+    genres: Optional[str] = field(init=False)
+    _genres: List[Dict[str, Any]] = field(
+        default_factory=list, metadata=config(field_name="genres")
+    )
+    bit_rate: Optional[int] = None
+    suffix: Optional[str] = None
+    created: Optional[datetime] = None
+    played: Optional[datetime] = None
+    play_count: Optional[int] = None
+
+    @classmethod
+    def fast_from_dict(cls, child: Dict[str, Any]) -> "Song":
+        """
+        Builds a song from a Subsonic ``child`` object without the generic decoder, which
+        is far too slow for whole-library listings. Gives the same result as ``from_dict``.
+        """
+        return cls(
+            id=child["id"],
+            title=child.get("title", child.get("name")),
+            path=child.get("path"),
+            parent_id=child.get("parent"),
+            duration=_fast_timedelta(child.get("duration")),
+            _artist=child.get("artist"),
+            artist_id=child.get("artistId"),
+            _album=child.get("album"),
+            album_id=child.get("albumId"),
+            _genre=child.get("genre"),
+            track=_fast_int(child.get("track")),
+            disc_number=_fast_int(child.get("discNumber")),
+            year=_fast_int(child.get("year")),
+            size=_fast_int(child.get("size")),
+            cover_art=child.get("coverArt"),
+            user_rating=_fast_int(child.get("userRating")),
+            starred=_fast_datetime(child.get("starred")),
+            album_artist=child.get("displayAlbumArtist"),
+            _album_artists=child.get("albumArtists") or [],
+            _genres=child.get("genres") or [],
+            bit_rate=_fast_int(child.get("bitRate")),
+            suffix=child.get("suffix"),
+            created=_fast_datetime(child.get("created")),
+            played=_fast_datetime(child.get("played")),
+            play_count=_fast_int(child.get("playCount")),
+        )
+
     def __post_init__(self):
         if not isinstance(self.id, str):
             self.id = str(self.id)
         self.parent_id = (self.parent_id or "root") if self.id != "root" else None
+        if not self.album_artist and self._album_artists:
+            self.album_artist = self._album_artists[0].get("name")
+        genre_names = [name for g in self._genres if (name := g.get("name"))]
+        self.genres = ", ".join(genre_names) if genre_names else (self._genre or None)
         self.artist = (
             None if not self._artist else ArtistAndArtistInfo(id=self.artist_id, name=self._artist)
         )

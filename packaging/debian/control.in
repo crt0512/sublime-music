@@ -1,0 +1,19 @@
+Package: sublime-music
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: @MAINTAINER@
+Installed-Size: @INSTALLED_SIZE@
+Depends: @DEPENDS@
+Recommends: @RECOMMENDS@
+Section: sound
+Priority: optional
+Homepage: https://sublimemusic.app
+Description: Native GTK3 Subsonic client (Plus fork)
+ Sublime Music is a native GTK3 client for Subsonic-compatible music servers
+ (Subsonic, Airsonic, Navidrome, Gonic, ...). It plays music locally through
+ mpv or on Chromecast devices, integrates with MPRIS, caches songs for offline
+ listening and shows the library by album, artist, folder, playlist or as one
+ sortable song table.
+ .
+ This package was built from the Sublime Music (Plus) fork with the @FLAVOUR@
+ dependency flavour (see the Makefile in the source tree).

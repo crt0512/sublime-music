@@ -7,7 +7,7 @@ from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 from ..adapters import AdapterManager, DownloadProgress, Result, api_objects as API
 from ..config import AppConfiguration, ProviderConfiguration
 from ..players import PlayerManager
-from ..ui import albums, artists, browse, player_controls, playlists, util
+from ..ui import albums, artists, browse, player_controls, playlists, songs, util
 from ..ui.common import DigitsEntry, IconButton, IconMenuButton, SpinnerImage
 
 
@@ -44,11 +44,13 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Create the stack
         self.albums_panel = albums.AlbumsPanel()
+        self.songs_panel = songs.SongsPanel()
         self.artists_panel = artists.ArtistsPanel()
         self.browse_panel = browse.BrowsePanel()
         self.playlists_panel = playlists.PlaylistsPanel()
         self.stack = self._create_stack(
             Albums=self.albums_panel,
+            Songs=self.songs_panel,
             Artists=self.artists_panel,
             Browse=self.browse_panel,
             Playlists=self.playlists_panel,
@@ -190,6 +192,16 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Main Settings
         self.notification_switch.set_active(app_config.song_play_notification)
+        self.confirm_queue_replacement_switch.set_active(app_config.confirm_queue_replacement)
+        self.queue_replacement_warning_size_entry.set_value(
+            app_config.queue_replacement_warning_size
+        )
+        self.queue_replacement_warning_size_entry.set_sensitive(
+            app_config.confirm_queue_replacement
+        )
+        self.song_library_sync_interval_entry.set_value(
+            app_config.song_library_sync_interval_minutes
+        )
 
         # Player settings
         for c in self.player_settings_box.get_children():
@@ -225,7 +237,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
                 option_value = app_config.player_config.get(player_name, {}).get(option_name)
 
-                if type(descriptor) == tuple:
+                if type(descriptor) is tuple:
                     option_store = Gtk.ListStore(str)
                     for option in descriptor:
                         option_store.append([option])
@@ -758,6 +770,37 @@ class MainWindow(Gtk.ApplicationWindow):
             "Enable Song Notifications", "song_play_notification"
         )
         vbox.add(notifications_box)
+
+        # PLAY QUEUE SETTINGS
+        # ==============================================================================
+        vbox.add(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        vbox.add(self._create_label("Play Queue", name="menu-settings-separator"))
+        (
+            confirm_queue_replacement_box,
+            self.confirm_queue_replacement_switch,
+        ) = self._create_toggle_menu_button(
+            "Ask Before Replacing the Play Queue", "confirm_queue_replacement"
+        )
+        vbox.add(confirm_queue_replacement_box)
+        (
+            queue_replacement_warning_size_box,
+            self.queue_replacement_warning_size_entry,
+        ) = self._create_spin_button_menu_item(
+            "Only When Longer Than (Songs)", 1, 1000, 1, "queue_replacement_warning_size"
+        )
+        vbox.add(queue_replacement_warning_size_box)
+
+        # SONG LIBRARY SETTINGS
+        # ==============================================================================
+        vbox.add(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        vbox.add(self._create_label("Song Library", name="menu-settings-separator"))
+        (
+            song_library_sync_interval_box,
+            self.song_library_sync_interval_entry,
+        ) = self._create_spin_button_menu_item(
+            "Auto-Sync Every (Minutes, 0 = Off)", 0, 1440, 5, "song_library_sync_interval_minutes"
+        )
+        vbox.add(song_library_sync_interval_box)
 
         # PLAYER SETTINGS
         # ==============================================================================

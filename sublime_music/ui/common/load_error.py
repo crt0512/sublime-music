@@ -2,7 +2,9 @@ from gi.repository import Gtk
 
 
 class LoadError(Gtk.Box):
-    def __init__(self, entity_name: str, action: str, has_data: bool, offline_mode: bool):
+    def __init__(  # noqa: B042 (a widget, not an exception, despite the name)
+        self, entity_name: str, action: str, has_data: bool, offline_mode: bool
+    ):
         Gtk.Box.__init__(self, orientation=Gtk.Orientation.VERTICAL)
 
         self.pack_start(Gtk.Box(), True, True, 0)

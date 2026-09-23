@@ -3,10 +3,22 @@ import copy
 import hashlib
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    cast,
+)
 
 import gi
 
@@ -136,7 +148,7 @@ class CacheMissError(Exception):
     error text to inform the user that retrieval from the ground truth adapter failed).
     """
 
-    def __init__(self, *args, partial_data: Any = None):
+    def __init__(self, *args, partial_data: Any = None):  # noqa: B042 (never pickled)
         """
         Create a :class:`CacheMissError` exception.
 
@@ -234,6 +246,98 @@ class UIInfo:
 
     def status_icon_name(self, status: str) -> str:
         return f"{self.icon_basename}-{status.lower()}-symbolic"
+
+
+@dataclass
+class SongQuery:
+    """
+    A query against the song library which a caching adapter mirrors locally (see
+    :class:`CachingAdapter.get_song_library`). Everything is evaluated locally, so any
+    combination of preset, sort and filter is allowed.
+
+    * ``preset`` restricts which songs are included.
+    * ``sort_column`` is one of :attr:`SongQuery.SORT_COLUMNS` and ``sort_descending``
+      flips the direction. Songs without a value for that column always sort last.
+    * ``filter_text`` keeps only the songs whose ``filter_column`` contains the text
+      (case-insensitive). ``filter_column`` is one of :attr:`SongQuery.FILTER_COLUMNS`;
+      ``"any"`` means title, artist, album artist or album.
+    * ``year_range`` (inclusive) only applies to :attr:`SongQuery.Preset.YEAR_RANGE`.
+    """
+
+    class Preset(Enum):
+        ALL = 0
+        STARRED = 1
+        RECENTLY_ADDED = 2
+        MOST_PLAYED = 3
+        TOP_RATED = 4
+        YEAR_RANGE = 5
+
+    SORT_COLUMNS: ClassVar[Tuple[str, ...]] = (
+        "title",
+        "artist",
+        "album_artist",
+        "album",
+        "genre",
+        "track",
+        "disc_number",
+        "year",
+        "duration",
+        "bit_rate",
+        "size",
+        "suffix",
+        "created",
+        "played",
+        "play_count",
+        "user_rating",
+        "starred",
+    )
+    FILTER_COLUMNS: ClassVar[Tuple[str, ...]] = (
+        "any",
+        "title",
+        "artist",
+        "album_artist",
+        "album",
+        "genre",
+    )
+
+    preset: Preset = Preset.ALL
+    sort_column: str = "created"  # newest first, until the user picks a column
+    sort_descending: bool = True
+    filter_text: str = ""
+    filter_column: str = "any"
+    year_range: Tuple[int, int] = this_decade()
+
+
+@dataclass
+class LibrarySong:
+    """
+    One song of the mirrored song library, flattened for display: names instead of
+    related objects, and the cache status already resolved. These are cheap to build even
+    for tens of thousands of songs, unlike full :class:`Song` objects.
+    """
+
+    id: str
+    title: str
+    artist: Optional[str] = None
+    artist_id: Optional[str] = None
+    album: Optional[str] = None
+    album_id: Optional[str] = None
+    album_artist: Optional[str] = None
+    genre: Optional[str] = None
+    track: Optional[int] = None
+    disc_number: Optional[int] = None
+    year: Optional[int] = None
+    duration: Optional[timedelta] = None
+    bit_rate: Optional[int] = None
+    size: Optional[int] = None
+    suffix: Optional[str] = None
+    created: Optional[datetime] = None
+    played: Optional[datetime] = None
+    play_count: Optional[int] = None
+    user_rating: Optional[int] = None
+    starred: Optional[datetime] = None
+    cover_art: Optional[str] = None
+    cache_status: SongCacheStatus = SongCacheStatus.NOT_CACHED
 
 
 class Adapter(abc.ABC):
@@ -475,6 +579,13 @@ class Adapter(abc.ABC):
         """
         return False
 
+    @property
+    def can_set_song_starred(self) -> bool:
+        """
+        Whether or not the adapter supports :class:`set_song_starred`.
+        """
+        return False
+
     # Artists
     @property
     def supported_artist_query_types(self) -> Set[AlbumSearchQuery.Type]:
@@ -692,6 +803,15 @@ class Adapter(abc.ABC):
         """
         raise self._check_can_error("set_song_rating")
 
+    def set_song_starred(self, song_id: str, starred: bool):
+        """
+        Star (favourite) or unstar the given song.
+
+        :param song_id: A string which uniquely identifies the song
+        :param starred: whether the song should be starred afterwards
+        """
+        raise self._check_can_error("set_song_starred")
+
     def get_artists(self) -> Sequence[Artist]:
         """
         Get a list of all of the artists known to the adapter.
@@ -813,6 +933,27 @@ class Adapter(abc.ABC):
             "Did you forget to check that can_{method_name} is True?"
         )
 
+    # Song Library
+    @property
+    def can_get_all_songs(self) -> bool:
+        """
+        Whether or not the adapter supports :class:`get_all_songs`.
+        """
+        return False
+
+    def get_all_songs(
+        self, on_progress: Callable[[int, Optional[int]], None] = lambda done, total: None
+    ) -> Sequence[Song]:
+        """
+        Get every song known to the adapter. For a big library this is a lot of data, so
+        it must only be called when the user asks for it. A caching adapter mirrors the
+        result (see :class:`CachingAdapter.get_song_library`).
+
+        :param on_progress: called now and then with the number of items retrieved so far
+            and the total, if it is known.
+        """
+        raise self._check_can_error("get_all_songs")
+
 
 class CachingAdapter(Adapter):
     """
@@ -861,9 +1002,12 @@ class CachingAdapter(Adapter):
         PLAYLISTS = "get_playlists"
         SEARCH_RESULTS = "search_results"
         SONG = "song"
+        SONGS = "songs"  # the whole song library
         SONG_FILE = "song_file"
         SONG_FILE_PERMANENT = "song_file_permanent"
         SONG_RATING = "song_rating"
+        SONG_STARRED = "song_starred"
+        SONG_PLAYED = "song_played"  # the song was played once more
 
         # These are only for clearing the cache, and will only do deletion
         ALL_SONGS = "all_songs"
@@ -931,3 +1075,20 @@ class CachingAdapter(Adapter):
         :returns: A dictionary of song ID to :class:`SongCacheStatus` objects for each
             of the songs.
         """
+
+    # Song Library
+    def get_song_library(self, query: SongQuery) -> Sequence[LibrarySong]:
+        """
+        Get the songs of the mirrored song library which match ``query`` (see
+        :class:`SongQuery`). The mirror is filled by ingesting
+        :class:`CachingAdapter.CachedDataKey.SONGS`.
+
+        :raises CacheMissError: if the library has never been synced.
+        """
+        raise NotImplementedError()
+
+    def song_library_last_synced(self) -> Optional[datetime]:
+        """
+        When the song library was last synced, or ``None`` if it never was.
+        """
+        raise NotImplementedError()

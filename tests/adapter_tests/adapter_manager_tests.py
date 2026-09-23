@@ -1,12 +1,24 @@
 import hashlib
+import json
 import threading
 from pathlib import Path
 from time import sleep
+from typing import Any, Iterator, cast
+from unittest import mock
 
 import pytest
 
-from sublime_music.adapters import AdapterManager, ConfigurationStore, Result, SearchResult
+from sublime_music.adapters import (
+    AdapterManager,
+    CacheMissError,
+    CachingAdapter,
+    ConfigurationStore,
+    Result,
+    SearchResult,
+    SongQuery,
+)
 from sublime_music.adapters.filesystem import FilesystemAdapter
+from sublime_music.adapters.manager import DownloadError
 from sublime_music.adapters.subsonic import SubsonicAdapter, api_objects as SubsonicAPI
 from sublime_music.config import AppConfiguration, ProviderConfiguration
 
@@ -275,3 +287,158 @@ def test_download_fails_when_other_thread_failed(adapter_manager: AdapterManager
     with pytest.raises(Exception, match="failed to download in another thread"):
         result.result()
     assert result.exception() is not None
+
+
+def test_song_library_sync_and_query(adapter_manager: AdapterManager):
+    assert AdapterManager._instance
+    assert AdapterManager.can_sync_song_library()
+    assert AdapterManager.song_library_last_synced() is None
+    with pytest.raises(CacheMissError):
+        AdapterManager.get_song_library(SongQuery()).result()
+
+    def search_response(*ids: str) -> str:
+        songs = [{"id": i, "title": f"Song {i}", "artist": "A", "artistId": "ar-1"} for i in ids]
+        return json.dumps(
+            {
+                "subsonic-response": {
+                    "status": "ok",
+                    "version": "1.15.0",
+                    "searchResult3": {"song": songs},
+                }
+            }
+        )
+
+    server = cast(SubsonicAdapter, AdapterManager._instance.ground_truth_adapter)
+    server._is_mock = True
+    server._set_mock_data(iter([search_response("tr-1"), search_response("tr-1", "tr-2")]))
+
+    AdapterManager.sync_song_library().result()
+    assert AdapterManager.song_library_last_synced() is not None
+    library = AdapterManager.get_song_library(
+        SongQuery(sort_column="title", sort_descending=False)
+    ).result()
+    assert [(s.id, s.title, s.artist) for s in library] == [
+        ("tr-1", "Song tr-1", "A"),
+        ("tr-2", "Song tr-2", "A"),
+    ]
+
+
+def _ok_response() -> str:
+    return json.dumps({"subsonic-response": {"status": "ok", "version": "1.15.0"}})
+
+
+def test_set_song_starred_and_rating_update_the_cache(adapter_manager: AdapterManager):
+    assert AdapterManager._instance and AdapterManager._instance.caching_adapter
+    caching_adapter = AdapterManager._instance.caching_adapter
+    caching_adapter.ingest_new_data(
+        CachingAdapter.CachedDataKey.SONG, "tr-1", SubsonicAPI.Song("tr-1", title="One")
+    )
+    server = cast(SubsonicAdapter, AdapterManager._instance.ground_truth_adapter)
+    server._is_mock = True
+    server._set_mock_data(iter([_ok_response(), _ok_response(), _ok_response()]))
+
+    AdapterManager.set_song_starred("tr-1", True).result()
+    assert AdapterManager.get_song_details("tr-1").result().starred is not None
+
+    song = AdapterManager.get_song_details("tr-1").result()
+    AdapterManager.set_song_rating(song, 4).result()
+    sleep(0.2)  # the cache update runs in the done callback
+    assert AdapterManager.get_song_details("tr-1").result().user_rating == 4
+
+    AdapterManager.set_song_starred("tr-1", False).result()
+    sleep(0.2)
+    assert AdapterManager.get_song_details("tr-1").result().starred is None
+
+
+def test_scrobble_bumps_the_cached_play_count(adapter_manager: AdapterManager):
+    assert AdapterManager._instance and AdapterManager._instance.caching_adapter
+    AdapterManager._instance.caching_adapter.ingest_new_data(
+        CachingAdapter.CachedDataKey.SONG, "tr-1", SubsonicAPI.Song("tr-1", title="One")
+    )
+    server = cast(SubsonicAdapter, AdapterManager._instance.ground_truth_adapter)
+    server._is_mock = True
+    server._set_mock_data(_ok_response())
+
+    song = AdapterManager.get_song_details("tr-1").result()
+    AdapterManager.scrobble_song(song).result()
+    sleep(0.2)
+    assert AdapterManager.get_song_details("tr-1").result().play_count == 1
+
+
+class _FakeResponse:
+    """What ``requests.get`` returns, for downloads that never reach a server."""
+
+    def __init__(
+        self,
+        status_code: int = 200,
+        content_type: str = "image/jpeg",
+        body: bytes = b"\xff\xd8\xff\xe0\x00\x10JFIF",
+    ):
+        self.status_code = status_code
+        self.reason = "Reason"
+        self.ok = status_code < 400
+        self.headers = {"Content-Type": content_type, "Content-Length": str(len(body))}
+        self._body = body
+
+    def iter_content(self, block_size: int) -> Iterator[bytes]:
+        for i in range(0, len(self._body), block_size):
+            yield self._body[i : i + block_size]
+
+    def json(self) -> Any:
+        return json.loads(self._body)
+
+    @property
+    def text(self) -> str:
+        return self._body.decode()
+
+
+@pytest.mark.parametrize(
+    "response, match, not_found",
+    [
+        (
+            _FakeResponse(502, "text/html; charset=utf-8", b"<html>Bad Gateway</html>"),
+            "HTTP 502",
+            False,
+        ),
+        (_FakeResponse(404, "text/plain", b"no such file"), "HTTP 404", True),
+        (_FakeResponse(200, "text/html", b"<html>please log in</html>"), "HTTP 200", False),
+        (_FakeResponse(body=b""), "empty response", True),
+        (
+            _FakeResponse(content_type="application/octet-stream", body=b"not an image"),
+            "not an image",
+            False,
+        ),
+    ],
+)
+def test_download_rejects_what_is_not_the_file(
+    adapter_manager: AdapterManager, response: _FakeResponse, match: str, not_found: bool
+):
+    assert AdapterManager._instance
+    with mock.patch("sublime_music.adapters.manager.requests.get", return_value=response):
+        result = AdapterManager._create_download_result(
+            "https://subsonic.example.com/rest/getCoverArt?id=1", "1", expect_image=True
+        )
+        with pytest.raises(DownloadError, match=match) as excinfo:
+            result.result()
+
+    assert cast(DownloadError, excinfo.value).not_found is not_found
+    # Nothing is left behind for the caching adapter (or a waiting thread) to pick up.
+    assert list(AdapterManager._instance.download_path.iterdir()) == []
+
+
+def test_download_accepts_an_image_without_a_content_type(adapter_manager: AdapterManager):
+    response = _FakeResponse(content_type="application/octet-stream", body=b"\x89PNG\r\n\x1a\n...")
+    with mock.patch("sublime_music.adapters.manager.requests.get", return_value=response):
+        path = AdapterManager._create_download_result(
+            "https://subsonic.example.com/rest/getCoverArt?id=2", "2", expect_image=True
+        ).result()
+    assert Path(path).read_bytes().startswith(b"\x89PNG")
+
+
+def test_song_download_is_not_checked_for_an_image(adapter_manager: AdapterManager):
+    response = _FakeResponse(content_type="audio/mpeg", body=b"ID3 not an image")
+    with mock.patch("sublime_music.adapters.manager.requests.get", return_value=response):
+        path = AdapterManager._create_download_result(
+            "https://subsonic.example.com/rest/stream?id=3", "3"
+        ).result()
+    assert Path(path).read_bytes() == b"ID3 not an image"

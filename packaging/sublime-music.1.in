@@ -1,0 +1,49 @@
+.TH SUBLIME-MUSIC 1 "2026-09-23" "sublime-music @VERSION@" "User Commands"
+.SH NAME
+sublime-music \- native GTK3 Subsonic client
+.SH SYNOPSIS
+.B sublime-music
+[\fB\-l\fR \fILOGFILE\fR] [\fB\-m\fR \fILOGLEVEL\fR] [\fB\-c\fR \fICONFIG\fR]
+.br
+.B sublime-music
+(\fB\-h\fR | \fB\-\-help\fR)
+.br
+.B sublime-music
+(\fB\-v\fR | \fB\-\-version\fR)
+.SH DESCRIPTION
+Sublime Music is a native GTK3 client for Subsonic-compatible music servers
+(Subsonic, Airsonic, Navidrome, Gonic, ...). It plays music locally through mpv
+or on Chromecast devices, integrates with MPRIS, caches songs for offline
+listening and shows the library by album, artist, folder, playlist or as one
+sortable song table.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show the help screen and exit.
+.TP
+\fB\-v\fR, \fB\-\-version\fR
+Show the version and exit.
+.TP
+\fB\-l\fR \fILOGFILE\fR, \fB\-\-logfile\fR \fILOGFILE\fR
+Write the log to \fILOGFILE\fR instead of standard error.
+.TP
+\fB\-m\fR \fILOGLEVEL\fR, \fB\-\-loglevel\fR \fILOGLEVEL\fR
+The minimum level to log: debug, info, warning (the default), error or critical.
+.TP
+\fB\-c\fR \fICONFIG\fR, \fB\-\-config\fR \fICONFIG\fR
+Use \fICONFIG\fR as the configuration file instead of
+\fI$XDG_CONFIG_HOME/sublime-music/config.json\fR.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/sublime-music/config.json
+The configuration, including the configured servers.
+.TP
+.I $XDG_DATA_HOME/sublime-music/
+The cache: the metadata database, cover art and downloaded songs, per server.
+.SH ENVIRONMENT
+.TP
+.B REQUEST_DELAY
+Two numbers separated by a comma, e.g. \fB3,5\fR: adds a random delay of that many
+seconds to every network request, to simulate a slow connection.
+.SH SEE ALSO
+https://github.com/sublime-music/sublime-music

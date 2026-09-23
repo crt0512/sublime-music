@@ -189,6 +189,7 @@ class PlayerControls(Gtk.ActionBar):
             self.artist_name.set_markup("")
 
         self.load_play_queue_button.set_sensitive(not self.offline_mode)
+        self.clear_play_queue_button.set_sensitive(len(app_config.state.play_queue) > 0)
         if app_config.state.loading_play_queue:
             self.play_queue_spinner.start()
             self.play_queue_spinner.show()
@@ -727,6 +728,12 @@ class PlayerControls(Gtk.ActionBar):
         )
         self.load_play_queue_button.set_action_name("app.update-play-queue-from-server")
         play_queue_popover_header.pack_end(self.load_play_queue_button, False, False, 0)
+
+        self.clear_play_queue_button = IconButton(
+            "edit-clear-all-symbolic", "Clear Queue", margin=5
+        )
+        self.clear_play_queue_button.set_action_name("app.clear-play-queue")
+        play_queue_popover_header.pack_end(self.clear_play_queue_button, False, False, 0)
 
         play_queue_popover_box.add(play_queue_popover_header)
 

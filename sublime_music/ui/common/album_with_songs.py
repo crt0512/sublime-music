@@ -1,5 +1,5 @@
 from random import randint
-from typing import Any, List, cast
+from typing import Any, List, Optional, cast
 
 from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 
@@ -30,9 +30,17 @@ class AlbumWithSongs(Gtk.Box):
         album: API.Album,
         cover_art_size: int = 200,
         show_artist_name: bool = True,
+        offline_mode: Optional[bool] = None,
     ):
+        """
+        :param offline_mode: whether the app is in offline mode. Without it the first
+            song list is rendered as if offline (uncached songs unplayable) until
+            ``update`` is called with the app config.
+        """
         Gtk.Box.__init__(self, orientation=Gtk.Orientation.HORIZONTAL)
         self.album = album
+        if offline_mode is not None:
+            self.offline_mode = offline_mode
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         artist_artwork = SpinnerImage(
