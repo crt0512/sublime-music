@@ -24,9 +24,15 @@ from PyInstaller.utils.hooks import collect_data_files
 
 MACOS = sys.platform == "darwin"
 ROOT = os.path.abspath(os.path.join(SPECPATH, "..", ".."))  # noqa: F821 (PyInstaller global)
+sys.path.insert(0, SPECPATH)  # noqa: F821 (PyInstaller global)
+
+from gi_typelib_fix import install_macos_gio_typedef_fix
+
 with open(os.path.join(ROOT, "sublime_music", "__init__.py")) as f:
     VERSION = re.search(r'^__version__ = "(.*)"', f.read(), re.M).group(1)
 ICNS = os.path.join(ROOT, "build", "sublime-music.icns")
+
+install_macos_gio_typedef_fix()
 
 
 def find_libmpv():

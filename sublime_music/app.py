@@ -2,6 +2,7 @@ import logging
 import os
 import random
 import shutil
+import subprocess
 import sys
 from concurrent.futures import Future
 from datetime import datetime, timedelta
@@ -22,18 +23,23 @@ except Exception:
 
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk
 
-try:
-    import gi
-
-    gi.require_version("Notify", "0.7")
-    from gi.repository import Notify  # mypy: ignore
-
-    glib_notify_exists = True
-except Exception:
-    # I really don't care what kind of exception it is, all that matters is the
-    # import failed for some reason.
-    logging.warning("Unable to import Notify from GLib. Notifications will be disabled.")
+if sys.platform == "darwin":
+    # macOS builds use osascript for native notifications below; libnotify is not
+    # expected to be present in the bundle.
     glib_notify_exists = False
+else:
+    try:
+        import gi
+
+        gi.require_version("Notify", "0.7")
+        from gi.repository import Notify  # mypy: ignore
+
+        glib_notify_exists = True
+    except Exception:
+        # I really don't care what kind of exception it is, all that matters is the
+        # import failed for some reason.
+        logging.warning("Unable to import Notify from GLib. Notifications will be disabled.")
+        glib_notify_exists = False
 
 from .adapters import (
     AdapterManager,
@@ -52,6 +58,28 @@ from .ui.configure_provider import ConfigureProviderDialog
 from .ui.main import MainWindow
 from .ui.state import RepeatType, UIState
 from .util import resolve_path
+
+
+MACOS_THEME_SYNC_INTERVAL_SECONDS = 5
+
+
+def macos_system_prefers_dark_theme() -> bool:
+    """Return whether macOS is currently using dark appearance."""
+    if sys.platform != "darwin":
+        return False
+
+    try:
+        result = subprocess.run(
+            ["defaults", "read", "-g", "AppleInterfaceStyle"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return False
+
+    return result.returncode == 0 and result.stdout.strip().lower() == "dark"
 
 
 def song_library_sync_due(
@@ -88,6 +116,7 @@ class SublimeMusicApp(Gtk.Application):
         self.window: Optional[Gtk.Window] = None
         self.app_config = AppConfiguration.load_from_file(config_file)
         self.dbus_manager: Optional[DBusManager] = None
+        self._macos_prefers_dark_theme: Optional[bool] = None
 
         self.connect("shutdown", self.on_app_shutdown)
 
@@ -96,6 +125,13 @@ class SublimeMusicApp(Gtk.Application):
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
+
+        if sys.platform == "darwin":
+            self.sync_macos_system_theme()
+            GLib.timeout_add_seconds(
+                MACOS_THEME_SYNC_INTERVAL_SECONDS,
+                self.sync_macos_system_theme,
+            )
 
         def add_action(name: str, fn: Callable, parameter_type: str | None = None):
             """Registers an action with the application."""
@@ -1059,6 +1095,21 @@ class SublimeMusicApp(Gtk.Application):
         ):
             self.window.songs_panel.start_sync()
         return True  # keep the timer running
+
+    def sync_macos_system_theme(self) -> bool:
+        """Keep GTK's dark-theme preference in sync with macOS appearance."""
+        if sys.platform != "darwin" or self.exiting:
+            return False
+
+        prefers_dark = macos_system_prefers_dark_theme()
+        if prefers_dark == self._macos_prefers_dark_theme:
+            return True
+
+        settings = Gtk.Settings.get_default()
+        if settings:
+            settings.set_property("gtk-application-prefer-dark-theme", prefers_dark)
+        self._macos_prefers_dark_theme = prefers_dark
+        return True
 
     def on_app_shutdown(self, app: "SublimeMusicApp"):
         self.exiting = True

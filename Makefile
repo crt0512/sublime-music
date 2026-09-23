@@ -48,7 +48,7 @@ VENV       := .venv
 PYI_VENV   := $(BUILD)/pyinstaller-venv
 PYI_DIST   := $(BUILD)/pyi
 PYI_SPEC   := packaging/pyinstaller/$(NAME).spec
-PYI_FILES  := $(PYI_SPEC) packaging/pyinstaller/entry.py packaging/pyinstaller/runtime_hook.py
+PYI_FILES  := $(PYI_SPEC) packaging/pyinstaller/entry.py packaging/pyinstaller/runtime_hook.py packaging/pyinstaller/gi_typelib_fix.py
 # $(call TOOL,name): the tool from .venv when it exists, otherwise whatever is on PATH.
 TOOL        = $(if $(wildcard $(VENV)/bin/$(1)),$(VENV)/bin/$(1),$(1))
 
