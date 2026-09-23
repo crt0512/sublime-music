@@ -9,9 +9,24 @@ import random
 import string
 import tempfile
 from datetime import datetime, timedelta
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from time import sleep
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Set,
+    Tuple,
+    Type,
+    Union,
+    cast,
+)
 from urllib.parse import urlencode, urlparse
 
 import requests
@@ -54,6 +69,35 @@ if delay_str := os.environ.get("REQUEST_DELAY"):
 NETWORK_ALWAYS_ERROR: bool = False
 if always_error := os.environ.get("NETWORK_ALWAYS_ERROR"):
     NETWORK_ALWAYS_ERROR = True
+
+
+class _ProcessContext(Protocol):
+    """The part of a multiprocessing context that is used here.
+
+    typeshed only declares ``Process`` on the concrete contexts (fork, spawn, default),
+    not on ``BaseContext``, so the helper below is typed structurally instead. A
+    read-only property (rather than an attribute) lets each context's own Process
+    subclass satisfy it.
+    """
+
+    @property
+    def Process(self) -> Type[BaseProcess]:  # noqa: N802 (matches multiprocessing)
+        ...
+
+
+def _ping_process_context() -> _ProcessContext:
+    """
+    Return the multiprocessing context for the Subsonic ping worker.
+
+    The ping worker updates multiprocessing.Value fields owned by the adapter. macOS
+    defaults to spawn, which is less reliable for the already-initialized adapter state
+    in the frozen app; using fork preserves the behavior this background ping logic was
+    written around.
+    """
+    try:
+        return multiprocessing.get_context("fork")
+    except ValueError:
+        return multiprocessing.get_context()
 
 
 class ServerError(Exception):
@@ -238,15 +282,23 @@ class SubsonicAdapter(Adapter):
         self.use_salt_auth = config["salt_auth"]
 
         self.is_shutting_down = False
-        self._ping_process: Optional[multiprocessing.Process] = None
+        self._ping_process: Optional[BaseProcess] = None
         self._version = multiprocessing.Array("c", 20)
         self._offline_mode = False
 
         # TODO (#112): support XML?
 
     def initial_sync(self):
-        # Try to ping the server five times using exponential backoff (2^5 = 32s).
-        self._exponential_backoff(5)
+        # Try once synchronously so the first UI update after initial sync reflects the
+        # real connection state. This runs inside AdapterManager's executor, not on the
+        # GTK thread. If the immediate ping fails, keep retrying in the background using
+        # exponential backoff.
+        try:
+            # typing doesn't support multiprocessing.Value very well
+            self._last_ping_timestamp.value = 0.0  # type: ignore
+            self._set_ping_status(timeout=2)
+        except Exception:
+            self._exponential_backoff(5)
 
     def shutdown(self):
         if self._ping_process:
@@ -262,7 +314,10 @@ class SubsonicAdapter(Adapter):
         if self._ping_process:
             self._ping_process.terminate()
 
-        self._ping_process = multiprocessing.Process(target=self._check_ping_thread, args=(n,))
+        self._ping_process = _ping_process_context().Process(
+            target=self._check_ping_thread,
+            args=(n,),
+        )
         self._ping_process.start()
 
     def _check_ping_thread(self, n: int):

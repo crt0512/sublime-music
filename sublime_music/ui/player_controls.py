@@ -13,7 +13,10 @@ from ..config import AppConfiguration
 from ..util import resolve_path
 from . import util
 from .common import IconButton, IconToggleButton, RatingButtonBox, SpinnerImage
+from .common.rating_button import RatingButton
 from .state import RepeatType
+
+SCALE_THUMB_CLICK_TOLERANCE_PX = 12
 
 
 class PlayerControls(Gtk.ActionBar):
@@ -25,6 +28,7 @@ class PlayerControls(Gtk.ActionBar):
         "song-scrub": (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (float,)),
         "volume-change": (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (float,)),
         "device-update": (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (str,)),
+        "song-starred": (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (bool,)),
         "song-clicked": (
             GObject.SignalFlags.RUN_FIRST,
             GObject.TYPE_NONE,
@@ -48,6 +52,14 @@ class PlayerControls(Gtk.ActionBar):
     cover_art_update_order_token = 0
     play_queue_update_order_token = 0
     offline_mode = False
+    updating_starred = False
+    current_starred = False
+
+    # Created in create_song_display(); declared here so that their types are known in
+    # the methods above it.
+    album_art: SpinnerImage
+    album_name: Gtk.Label
+    artist_name: Gtk.Label
 
     def __init__(self):
         Gtk.ActionBar.__init__(self)
@@ -55,6 +67,7 @@ class PlayerControls(Gtk.ActionBar):
 
         if AdapterManager.can_get_song_rating():
             self.create_rating_buttons()
+        self.create_star_button()
         song_display = self.create_song_display()
         playback_controls = self.create_playback_controls()
         rating_play_queue_volume = self.create_rating_play_queue_volume()
@@ -112,6 +125,8 @@ class PlayerControls(Gtk.ActionBar):
         self.prev_button.set_sensitive(has_current_song)
         self.play_button.set_sensitive(has_current_song)
         self.next_button.set_sensitive(has_current_song and has_next_song)
+        self.star_button.set_visible(AdapterManager.can_set_song_starred())
+        self.star_button.set_sensitive(has_current_song)
 
         self.connecting_to_device = app_config.state.connecting_to_device
 
@@ -163,6 +178,8 @@ class PlayerControls(Gtk.ActionBar):
             )
             if AdapterManager.can_get_song_rating():
                 self.update_rating(app_config.state.current_song.user_rating)
+            if AdapterManager.can_set_song_starred():
+                self.update_starred(app_config.state.current_song.starred is not None)
 
             self.song_title.set_markup(bleach.clean(app_config.state.current_song.title))
             # TODO (#71): use walrus once MYPY gets its act together
@@ -353,6 +370,20 @@ class PlayerControls(Gtk.ActionBar):
     def update_rating(self, rating: int | None):
         self.rating_buttons_box.rating = rating
 
+    def update_starred(self, starred: bool):
+        self.current_starred = starred
+        self.star_button.set_icon("star-full" if starred else "star-empty")
+        self.star_button.set_tooltip_text(
+            "Unstar current song" if starred else "Star current song"
+        )
+
+    def on_star_clicked(self, button: RatingButton):
+        if self.updating_starred:
+            return
+        starred = not self.current_starred
+        self.update_starred(starred)
+        self.emit("song-starred", starred)
+
     def on_rating_clicked(self, _, rating: int):
         if AdapterManager.can_set_song_rating():
             self.emit("song-rated")
@@ -391,6 +422,45 @@ class PlayerControls(Gtk.ActionBar):
     def on_volume_change(self, scale: Gtk.Scale):
         if not self.editing:
             self.emit("volume-change", scale.get_value())
+
+    def _scale_value_at_event(self, scale: Gtk.Scale, event: Gdk.EventButton) -> float:
+        allocation = scale.get_allocation()
+        width = max(1, allocation.width)
+        x = min(max(event.x, 0), width)
+        adjustment = scale.get_adjustment()
+        lower = adjustment.get_lower()
+        upper = adjustment.get_upper()
+        return lower + (x / width) * (upper - lower)
+
+    def _scale_current_value_x(self, scale: Gtk.Scale) -> float:
+        allocation = scale.get_allocation()
+        adjustment = scale.get_adjustment()
+        lower = adjustment.get_lower()
+        upper = adjustment.get_upper()
+        if upper == lower:
+            return 0
+        return allocation.width * ((scale.get_value() - lower) / (upper - lower))
+
+    def _on_scale_button_press(
+        self,
+        scale: Gtk.Scale,
+        event: Gdk.EventButton,
+        signal_name: str | None = None,
+    ) -> bool:
+        if event.button != 1:
+            return False
+
+        # If the click is on the thumb, let GTK handle dragging normally. Trough clicks
+        # are handled here because GTK's default page-step behavior is surprising on
+        # macOS: the control jumps much farther than the clicked position implies.
+        if abs(event.x - self._scale_current_value_x(scale)) <= SCALE_THUMB_CLICK_TOLERANCE_PX:
+            return False
+
+        value = self._scale_value_at_event(scale, event)
+        scale.set_value(value)
+        if signal_name:
+            self.emit(signal_name, value)
+        return True
 
     def on_play_queue_click(self, _: Any):
         if self.play_queue_popover.is_visible():
@@ -533,6 +603,9 @@ class PlayerControls(Gtk.ActionBar):
     def create_song_display(self) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
 
+        box.pack_start(self.star_button, False, False, 0)
+        self.star_button.hide()
+
         self.album_art = SpinnerImage(
             image_name="player-controls-album-artwork",
             image_size=70,
@@ -571,7 +644,8 @@ class PlayerControls(Gtk.ActionBar):
         # Scrubber and song progress/length labels
         scrubber_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
 
-        self.song_progress_label = Gtk.Label(label="-:--")
+        self.song_progress_label = Gtk.Label(label="-:--", xalign=1)
+        self.song_progress_label.set_name("song-progress-label")
         scrubber_box.pack_start(self.song_progress_label, False, False, 5)
 
         self.song_scrubber = Gtk.Scale.new_with_range(
@@ -580,11 +654,26 @@ class PlayerControls(Gtk.ActionBar):
         self.song_scrubber.set_name("song-scrubber")
         self.song_scrubber.set_draw_value(False)
         self.song_scrubber.set_restrict_to_fill_level(False)
+        self.song_scrubber.connect(
+            "button-press-event",
+            self._on_scale_button_press,
+            "song-scrub",
+        )
         self.song_scrubber.connect("change-value", lambda s, t, v: self.emit("song-scrub", v))
         scrubber_box.pack_start(self.song_scrubber, True, True, 0)
 
-        self.song_duration_label = Gtk.Label(label="-:--")
+        self.song_duration_label = Gtk.Label(label="-:--", xalign=0)
+        self.song_duration_label.set_name("song-duration-label")
         scrubber_box.pack_start(self.song_duration_label, False, False, 5)
+
+        # The action bar centres this whole widget at its natural width, so if the
+        # progress label got wider or narrower as the seconds tick, every control in
+        # here would shift sideways. Keep both time labels as wide as the wider one (the
+        # duration, which only changes with the song). The stylesheet also asks for
+        # tabular digits, so that all digits have the same width.
+        self._time_label_size_group = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
+        self._time_label_size_group.add_widget(self.song_progress_label)
+        self._time_label_size_group.add_widget(self.song_duration_label)
 
         box.add(scrubber_box)
 
@@ -653,6 +742,15 @@ class PlayerControls(Gtk.ActionBar):
         self.rating_buttons_box.set_property("sensitive", True)
         self.rating_buttons_box.connect("rating-clicked", self.on_rating_clicked)
         self.rating_buttons_box.connect("rating-remove", self.on_rating_removed)
+
+    def create_star_button(self):
+        self.star_button = RatingButton(
+            "star-empty",
+            "Star current song",
+            valign=Gtk.Align.CENTER,
+            margin_right=8,
+        )
+        self.star_button.connect("clicked", self.on_star_clicked)
 
     def create_rating_play_queue_volume(self) -> Gtk.Box:
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -795,7 +893,7 @@ class PlayerControls(Gtk.ActionBar):
         column.set_resizable(True)
         self.play_queue_list.append_column(column)
 
-        renderer = Gtk.CellRendererText(markup=True, ellipsize=Pango.EllipsizeMode.END)
+        renderer = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
         column = Gtk.TreeViewColumn("", renderer, markup=2, sensitive=0)
         self.play_queue_list.append_column(column)
 
@@ -832,6 +930,7 @@ class PlayerControls(Gtk.ActionBar):
         )
         self.volume_slider.set_name("volume-slider")
         self.volume_slider.set_draw_value(False)
+        self.volume_slider.connect("button-press-event", self._on_scale_button_press, None)
         self.volume_slider.connect("value-changed", self.on_volume_change)
         box.pack_start(self.volume_slider, True, True, 0)
 

@@ -36,7 +36,7 @@ class SongColumn:
     sortable: bool = True
     align: float = 0.0
     width: Optional[int] = None  # None: the column takes the remaining space
-    bold: bool = False
+    bold: bool = False  # the title: bold for the song that is in the player
 
 
 COLUMNS: List[SongColumn] = [
@@ -85,9 +85,12 @@ FILTER_COLUMNS = [
 ]
 
 # Layout of the list store: a few bookkeeping values, then one value per column.
-PLAYABLE, SONG_ID = 0, 1
-FIRST_COLUMN = 2
-STORE_TYPES = [bool, str] + [bool if c.kind == "toggle" else str for c in COLUMNS]
+# TITLE_WEIGHT: the Pango weight of the title, bold for the song in the player. STRIPED:
+# every other row, for the alternating background.
+PLAYABLE, SONG_ID, TITLE_WEIGHT, STRIPED = 0, 1, 2, 3
+FIRST_COLUMN = 4
+STORE_TYPES = [bool, str, int, bool] + [bool if c.kind == "toggle" else str for c in COLUMNS]
+NORMAL_WEIGHT, BOLD_WEIGHT = int(Pango.Weight.NORMAL), int(Pango.Weight.BOLD)
 STORE_INDEX = {c.name: FIRST_COLUMN + i for i, c in enumerate(COLUMNS)}
 CHECKED = STORE_INDEX["checked"]
 
@@ -99,6 +102,9 @@ CACHE_STATUS_ICONS = {
 PLAYABLE_OFFLINE = (SongCacheStatus.CACHED, SongCacheStatus.PERMANENTLY_CACHED)
 # Rows per event-loop turn while filling the table: small enough for redraws in between.
 FILL_CHUNK = 500
+# Alternate rows are tinted with the text colour at this opacity, so that the stripes are
+# subtle on both light and dark themes.
+STRIPE_ALPHA = 0.06
 # When the app starts on this tab, the library is loaded this long after the window is on
 # screen, so that the window appears and settles first.
 STARTUP_LOAD_DELAY_MS = 500
@@ -169,7 +175,7 @@ def song_row(song: LibrarySong, offline_mode: bool) -> List[Any]:
         "played": _format_datetime(song.played),
     }
     playable = not offline_mode or song.cache_status in PLAYABLE_OFFLINE
-    return [playable, song.id, *(values[c.name] for c in COLUMNS)]
+    return [playable, song.id, NORMAL_WEIGHT, False, *(values[c.name] for c in COLUMNS)]
 
 
 class SongsPanel(Gtk.Box):
@@ -277,9 +283,14 @@ class SongsPanel(Gtk.Box):
         selection.set_mode(Gtk.SelectionMode.MULTIPLE)
         selection.set_select_function(lambda _, model, path, current: model[path[0]][PLAYABLE])
         self.columns: Dict[str, Gtk.TreeViewColumn] = {}
+        self._renderers: List[Gtk.CellRenderer] = []
+        self._current_song_id: Optional[str] = None
         for column in COLUMNS:
             self.columns[column.name] = self._make_column(column)
             self.tree.append_column(self.columns[column.name])
+        self.tree.connect("style-updated", self._update_stripe_color)
+        self.tree.connect("map", self._update_stripe_color)
+        self._update_stripe_color()
         self.tree.connect("row-activated", self.on_song_activated)
         self.tree.connect("button-press-event", self.on_song_button_press)
         self.tree.connect("columns-changed", self.on_columns_changed)
@@ -328,27 +339,36 @@ class SongsPanel(Gtk.Box):
 
     def _make_column(self, column: SongColumn) -> Gtk.TreeViewColumn:
         index = STORE_INDEX[column.name]
+        renderer: Gtk.CellRenderer
         if column.kind == "toggle":
-            toggle = Gtk.CellRendererToggle(activatable=True)
-            toggle.connect("toggled", self.on_check_toggled)
-            tree_column = Gtk.TreeViewColumn(column.title, toggle, active=index)
+            renderer = Gtk.CellRendererToggle(activatable=True)
+            renderer.connect("toggled", self.on_check_toggled)
+            tree_column = Gtk.TreeViewColumn(column.title, renderer, active=index)
         elif column.kind == "icon":
-            icon = Gtk.CellRendererPixbuf()
+            renderer = Gtk.CellRendererPixbuf()
             tree_column = Gtk.TreeViewColumn(
-                column.title, icon, icon_name=index, sensitive=PLAYABLE
+                column.title, renderer, icon_name=index, sensitive=PLAYABLE
             )
         else:
-            text = Gtk.CellRendererText(
-                xalign=column.align,
-                weight=Pango.Weight.BOLD if column.bold else Pango.Weight.NORMAL,
-                ellipsize=Pango.EllipsizeMode.END,
+            renderer = Gtk.CellRendererText(xalign=column.align, ellipsize=Pango.EllipsizeMode.END)
+            renderer.set_fixed_size(-1, 35)
+            tree_column = Gtk.TreeViewColumn(
+                column.title, renderer, text=index, sensitive=PLAYABLE
             )
-            text.set_fixed_size(-1, 35)
-            tree_column = Gtk.TreeViewColumn(column.title, text, text=index, sensitive=PLAYABLE)
             tree_column.set_alignment(column.align)
+            if column.bold:
+                # Bold for the song in the player only; the row carries the weight. (Binding
+                # "weight-set" instead does not work: switching it back on resets the
+                # weight to normal rather than restoring bold.)
+                tree_column.add_attribute(renderer, "weight", TITLE_WEIGHT)
             if column.name == "user_rating":
-                self.rating_renderer = text
-                tree_column.set_cell_data_func(text, self._rating_cell_data)
+                self.rating_renderer = renderer
+                tree_column.set_cell_data_func(renderer, self._rating_cell_data)
+
+        # Alternating rows: the tint is set on the renderers (see _update_stripe_color),
+        # and the row says whether it is painted.
+        tree_column.add_attribute(renderer, "cell-background-set", STRIPED)
+        self._renderers.append(renderer)
 
         # Fixed sizing is what makes the fixed-row-height table fast for 20k rows.
         tree_column.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
@@ -372,6 +392,8 @@ class SongsPanel(Gtk.Box):
             self.tree.get_selection().unselect_all()
         self.offline_mode = app_config.offline_mode
         self.play_from_count = app_config.play_from_here_count
+        current_song = app_config.state.current_song
+        self._set_current_song(current_song.id if current_song else None)
 
         self._updating = True
         try:
@@ -518,7 +540,8 @@ class SongsPanel(Gtk.Box):
             nonlocal position
             if token != self._load_token:
                 return False
-            for row in rows[position : position + FILL_CHUNK]:
+            for i, row in enumerate(rows[position : position + FILL_CHUNK], position):
+                row[STRIPED] = i % 2 == 1
                 store.append(row)
             position += FILL_CHUNK
             if position < len(rows):
@@ -528,6 +551,9 @@ class SongsPanel(Gtk.Box):
             self.tree.set_model(store)
             self._show_sort_indicator()  # replacing the model clears the header arrows
             self._row_index = {row[SONG_ID]: i for i, row in enumerate(rows)}
+            if self._current_song_id is not None:
+                if (index := self._row_index.get(self._current_song_id)) is not None:
+                    store[index][TITLE_WEIGHT] = BOLD_WEIGHT
             self._loaded_query = query
             self._loaded_last_synced = last_synced
             self._loaded_offline_mode = offline_mode
@@ -551,6 +577,23 @@ class SongsPanel(Gtk.Box):
         self.error_container.pack_start(error, True, True, 0)
         self.error_container.show_all()
         self.content.set_visible_child_name("error")
+
+    def _set_current_song(self, song_id: Optional[str]):
+        """Bolds the title of the song in the player and un-bolds the previous one."""
+        if song_id == self._current_song_id:
+            return
+        for sid, weight in ((self._current_song_id, NORMAL_WEIGHT), (song_id, BOLD_WEIGHT)):
+            index = self._row_index.get(sid) if sid is not None else None
+            if index is not None and index < len(self.store):
+                self.store[index][TITLE_WEIGHT] = weight
+        self._current_song_id = song_id
+
+    def _update_stripe_color(self, *_: Any):
+        """Tints alternate rows with the current text colour, so it follows the theme."""
+        color = self.tree.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+        tint = Gdk.RGBA(color.red, color.green, color.blue, STRIPE_ALPHA)
+        for renderer in self._renderers:
+            renderer.props.cell_background_rgba = tint
 
     def refresh_cache_status(self, song_id: str):
         """Updates the download status icon of one song in place."""

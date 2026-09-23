@@ -1,3 +1,4 @@
+import logging
 import re
 import threading
 from datetime import timedelta
@@ -10,6 +11,26 @@ from .base import Player, PlayerDeviceEvent, PlayerEvent
 
 REPLAY_GAIN_KEY = "Replay Gain"
 GAPLESS_PLAYBACK_KEY = "Gapless Playback"
+
+_MPV_LOG_LEVELS = {
+    "fatal": logging.CRITICAL,
+    "error": logging.ERROR,
+    "warn": logging.WARNING,
+    "info": logging.INFO,
+}
+
+
+def _forward_mpv_log(level: str, component: str, message: str):
+    """
+    Forward libmpv's log messages to Python logging.
+
+    Only warnings and worse are requested from mpv, so this stays quiet normally, but
+    things like "Audio device underrun detected" or ffmpeg decode errors end up in the
+    app log with a timestamp instead of vanishing.
+    """
+    logging.getLogger("mpv").log(
+        _MPV_LOG_LEVELS.get(level, logging.DEBUG), f"[{component}] {message.rstrip()}"
+    )
 
 
 class MPVPlayer(Player):
@@ -42,7 +63,7 @@ class MPVPlayer(Player):
         player_device_change_callback: Callable[[PlayerDeviceEvent], None],
         config: Dict[str, Union[str, int, bool]],
     ):
-        self.mpv = mpv.MPV()
+        self.mpv = mpv.MPV(log_handler=_forward_mpv_log, loglevel="warn")
         self._mpv_version = MPVPlayer._parse_mpv_version(self.mpv.mpv_version)
         if MPVPlayer._is_mock:
             self.mpv.audio_device = "null"

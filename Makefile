@@ -51,6 +51,9 @@ PYI_SPEC   := packaging/pyinstaller/$(NAME).spec
 PYI_FILES  := $(PYI_SPEC) packaging/pyinstaller/entry.py packaging/pyinstaller/runtime_hook.py packaging/pyinstaller/gi_typelib_fix.py
 # $(call TOOL,name): the tool from .venv when it exists, otherwise whatever is on PATH.
 TOOL        = $(if $(wildcard $(VENV)/bin/$(1)),$(VENV)/bin/$(1),$(1))
+# The interpreter for run/test: .venv's python when it exists, otherwise $(PYTHON)
+# (macOS has no bare `python`, only python3).
+VENV_PYTHON = $(if $(wildcard $(VENV)/bin/python),$(VENV)/bin/python,$(PYTHON))
 
 LIBDIR     := $(PREFIX)/lib/$(NAME)
 ICON_SIZES := 16 22 24 32 36 48 64 72 96 128 192 512
@@ -59,6 +62,9 @@ ICON_SIZES := 16 22 24 32 36 48 64 72 96 128 192 512
 # against the system's GTK, so it always comes from the system: python3-gi on
 # Debian, pygobject3 from Homebrew on macOS). Keep in sync with pyproject.toml.
 VENDOR_DEPS := bleach bottle dataclasses-json peewee pychromecast python-dateutil mpv requests semver thefuzz keyring
+# macOS only: PyObjC for Now Playing / media keys and the in-process appearance check.
+# Installed into both .venv and the PyInstaller venv so `make run` matches the bundle.
+MACOS_DEPS := $(if $(filter Darwin,$(shell uname)),pyobjc-framework-MediaPlayer,)
 
 # What both flavours need from the system.
 SYSTEM_DEPENDS := python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, gir1.2-glib-2.0, libmpv2
@@ -121,7 +127,7 @@ $(PYI_VENV)/.stamp: pyproject.toml $(wildcard $(VENDOR_LOCK))
 	rm -rf $(PYI_VENV)
 	$(PYI_PYTHON) -m venv --system-site-packages $(PYI_VENV)
 	$(PYI_VENV)/bin/pip install --upgrade pip
-	$(PYI_VENV)/bin/pip install --ignore-installed $(VENDOR_SPEC) "pyinstaller >=6, <7"
+	$(PYI_VENV)/bin/pip install --ignore-installed $(VENDOR_SPEC) $(MACOS_DEPS) "pyinstaller >=6, <7"
 	@$(PYI_VENV)/bin/python -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' \
 	    || { echo "PyGObject with GTK 3 is not available to $(PYI_PYTHON) (python3-gi on Debian, pygobject3 from Homebrew)"; exit 1; }
 	touch $@
@@ -319,7 +325,7 @@ endif
 # ----------------------------------------------------------------------------
 
 run: ## Run the app from the source tree, with .venv when it exists (ARGS="-m debug" for logging)
-	PYTHONPATH=. $(call TOOL,python) -m $(PACKAGE) $(ARGS)
+	PYTHONPATH=. $(VENV_PYTHON) -m $(PACKAGE) $(ARGS)
 
 venv: $(VENV)/.stamp ## Create .venv with the app's dependencies and the dev/test tools (PyGObject from the system)
 
@@ -333,11 +339,11 @@ $(VENV)/.stamp: pyproject.toml $(wildcard $(VENDOR_LOCK))
 	$(VENV)/bin/pip install --no-deps -e .
 	mkdir -p $(BUILD)
 	$(VENV)/bin/python -c 'import tomllib; e = tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]; print("\n".join(r for k in ("dev", "test") for r in e[k]))' > $(BUILD)/dev-requirements.txt
-	$(VENV)/bin/pip install --ignore-installed $(VENDOR_SPEC) -r $(BUILD)/dev-requirements.txt
+	$(VENV)/bin/pip install --ignore-installed $(VENDOR_SPEC) $(MACOS_DEPS) -r $(BUILD)/dev-requirements.txt
 	touch $@
 
 test: ## Run the test suite (pytest, with doctests and coverage as configured in setup.cfg)
-	PYTHONPATH=. $(call TOOL,python) -m pytest
+	PYTHONPATH=. $(VENV_PYTHON) -m pytest
 
 lint: ## Check formatting, imports, style and types
 	$(call TOOL,black) --check $(PACKAGE) tests

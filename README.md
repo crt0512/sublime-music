@@ -21,6 +21,7 @@ The Albums tab of Sublime Music with the Play Queue opened.
 - The Songs tab: the whole library in one sortable, filterable table.
 - Clear Cue Button in Cue
 - Cue Replacement Warnings
+- Keyboard media key grabber so your browser doesnt steal media keys from you (on GNOME based stuff and MacOS, rest can still be stolen by your browser unfortunately)
 
 ### Improvements and Bugfixes :
 
@@ -36,7 +37,6 @@ The Albums tab of Sublime Music with the Play Queue opened.
 - Switch between multiple Subsonic API (v1.8.0+) compliant servers.
 - Play music through Chromecast devices on the same LAN.
 - Offline Mode where Sublime Music will not make any network requests.
-- DBus MPRIS interface integration for controlling Sublime Music via clients such as `playerctl`, `i3status-rust`, KDE Connect, and many commonly used desktop environments.
 - Browse songs by the sever reported filesystem structure, or view them organized by ID3 tags in the Albums, Artists, and Playlists views.
 - Intuitive play queue.
 - Create/delete/edit playlists.
@@ -91,6 +91,7 @@ make run ARGS="-m debug"    # with debug logging
 ```
 
 ### macOS
+You probably dont want to actually use this on MacOS tbh, using quiet some hacky ways to get it running without homebrew dependencies. Seems usable to me by now
 
 You'll need this based on your System Architecture :
 
@@ -107,11 +108,11 @@ xcode-select --install
 sudo port install python313 py313-pip py313-gobject3 gtk3 gobject-introspection adwaita-icon-theme librsvg mpv fontconfig
 ```
 
-`make pkg` on a Mac builds a self-contained `Sublime Music.app` (Python, GTK, PyGObject,
-libmpv and all Python dependencies inside, built with PyInstaller) and wraps it in
-`dist/SublimeMusic-<version>-bundled.pkg`, which installs it into `/Applications`.
-Homebrew/MacPorts is needed to build it, not to run it by default.
-If you use `make pkg BUNDLE=0` it builds a thin app that uses the Homebrew/MacPorts Python and GTK instead.
+`make pkg` on a Mac builds a self contained `Sublime Music.app` (Python, GTK, PyGObject, libmpv and all Python dependencies inside, built with PyInstaller) and wraps it in `dist/SublimeMusic-<version>-bundled.pkg`, which installs it into `/Applications`.
+
+Homebrew/MacPorts is needed to build it, not to run it in theory.
+
+If you use `make pkg BUNDLE=0` it builds a thin app that uses the Homebrew/MacPorts Python and GTK instead of bundling it in.
 
 ### Change of Build system/Method
 

@@ -6,7 +6,8 @@ import multiprocessing
 import os
 import socket
 from datetime import timedelta
-from typing import Any, Callable, Dict, Optional, Set, Tuple, Type, Union, cast
+from multiprocessing.process import BaseProcess
+from typing import Any, Callable, Dict, Optional, Protocol, Set, Tuple, Type, Union, cast
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -26,6 +27,36 @@ except ImportError:  # pychromecast before 10 has no listener base classes
 
 SERVE_FILES_KEY = "Serve Local Files to Chromecasts on the LAN"
 LAN_PORT_KEY = "LAN Server Port Number"
+
+
+class _ProcessContext(Protocol):
+    """The part of a multiprocessing context that is used here.
+
+    typeshed only declares ``Process`` on the concrete contexts (fork, spawn, default),
+    not on ``BaseContext``, so the helper below is typed structurally instead. A
+    read-only property (rather than an attribute) lets each context's own Process
+    subclass satisfy it.
+    """
+
+    @property
+    def Process(self) -> Type[BaseProcess]:  # noqa: N802 (matches multiprocessing)
+        ...
+
+
+def _server_process_context() -> _ProcessContext:
+    """
+    Return the multiprocessing context for the Chromecast LAN file server.
+
+    The server process serves files via the already-configured AdapterManager and
+    shared token/song-id buffers, so it relies on fork-style state inheritance. macOS
+    defaults to spawn, and frozen spawn would also need to pickle the whole
+    ChromecastPlayer, including GTK callbacks from the app. Prefer fork when the
+    platform offers it and fall back to the default context elsewhere.
+    """
+    try:
+        return multiprocessing.get_context("fork")
+    except ValueError:
+        return multiprocessing.get_context()
 
 
 class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
@@ -57,7 +88,7 @@ class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
         player_device_change_callback: Callable[[PlayerDeviceEvent], None],
         config: Dict[str, Union[str, int, bool]],
     ):
-        self.server_process: Optional[multiprocessing.Process] = None
+        self.server_process: Optional[BaseProcess] = None
         self.on_timepos_change = on_timepos_change
         self.on_track_end = on_track_end
         self.on_player_event = on_player_event
@@ -93,7 +124,7 @@ class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
                 except Exception:
                     pass
 
-            self.server_process = multiprocessing.Process(
+            self.server_process = _server_process_context().Process(
                 target=self._run_server_process,
                 args=("0.0.0.0", self.config.get(LAN_PORT_KEY)),
             )

@@ -185,6 +185,13 @@ entry.invalid {
   min-width: 400px;
 }
 
+/* Tabular digits, so the time labels keep their width as the seconds tick (the macOS
+   system font has proportional digits by default). */
+#player-controls-bar #song-progress-label,
+#player-controls-bar #song-duration-label {
+  font-feature-settings: "tnum";
+}
+
 #player-controls-bar #volume-slider {
   min-width: 90px;
 }

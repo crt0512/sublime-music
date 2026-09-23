@@ -68,7 +68,7 @@ a = Analysis(  # noqa: F821
     binaries=binaries,
     datas=datas,
     hiddenimports=(
-        ["keyring.backends.macOS"]
+        ["keyring.backends.macOS", "MediaPlayer"]
         if MACOS
         else ["keyring.backends.SecretService", "keyring.backends.kwallet"]
     )

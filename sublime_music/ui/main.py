@@ -41,6 +41,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_default_size(1342, 756)
+        self._last_search_query: Optional[str] = None
 
         # Create the stack
         self.albums_panel = albums.AlbumsPanel()
@@ -276,7 +277,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 elif descriptor == int:
                     int_editor_box = Gtk.Box()
 
-                    entry = DigitsEntry(width_chars=8, text=option_value, sensitive=False)
+                    entry = DigitsEntry(width_chars=8, text=str(option_value), sensitive=False)
                     int_editor_box.add(entry)
 
                     buttons_box = Gtk.Box()
@@ -495,6 +496,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.search_entry.connect("button-press-event", self._on_search_entry_button_press)
         self.search_entry.connect("focus-out-event", self._on_search_entry_loose_focus)
         self.search_entry.connect("changed", self._on_search_entry_changed)
+        self.search_entry.connect("search-changed", self._on_search_entry_changed)
         self.search_entry.connect("stop-search", self._on_search_entry_stop_search)
         header.pack_start(self.search_entry)
 
@@ -987,6 +989,13 @@ class MainWindow(Gtk.ApplicationWindow):
     searches: Set[Result] = set()
 
     def _on_search_entry_changed(self, entry: Gtk.Entry):
+        query = entry.get_text().strip()
+        if query == self._last_search_query:
+            return
+
+        self._last_search_query = query
+        self.search_idx += 1
+
         while len(self.searches) > 0:
             search = self.searches.pop()
             if search:
@@ -995,6 +1004,11 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self.search_popup.is_visible():
             self.search_popup.show_all()
             self.search_popup.popup()
+
+        if query == "":
+            self._set_search_loading(False)
+            self._clear_search_results()
+            return
 
         def search_result_calback(idx: int, result: API.SearchResult):
             # Ignore slow returned searches.
@@ -1011,9 +1025,8 @@ class MainWindow(Gtk.ApplicationWindow):
             # If all results are back, the stop the loading indicator.
             GLib.idle_add(self._set_search_loading, False)
 
-        self.search_idx += 1
         search_result = AdapterManager.search(
-            entry.get_text(),
+            query,
             search_callback=partial(search_result_calback, self.search_idx),
             before_download=lambda: self._set_search_loading(True),
         )
@@ -1077,10 +1090,17 @@ class MainWindow(Gtk.ApplicationWindow):
 
         return row
 
+    def _clear_search_results(self):
+        self._remove_all_from_widget(self.song_results)
+        self._remove_all_from_widget(self.album_results)
+        self._remove_all_from_widget(self.artist_results)
+        self._remove_all_from_widget(self.playlist_results)
+
     def _update_search_results(self, search_results: API.SearchResult):
+        self._clear_search_results()
+
         # Songs
         if search_results.songs is not None:
-            self._remove_all_from_widget(self.song_results)
             for song in search_results.songs:
                 label_text = util.dot_join(
                     f"<b>{song.title}</b>",
@@ -1097,7 +1117,6 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Albums
         if search_results.albums is not None:
-            self._remove_all_from_widget(self.album_results)
             for album in search_results.albums:
                 label_text = util.dot_join(
                     f"<b>{album.name}</b>",
@@ -1114,7 +1133,6 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Artists
         if search_results.artists is not None:
-            self._remove_all_from_widget(self.artist_results)
             for artist in search_results.artists:
                 assert artist.id
                 self.artist_results.add(
@@ -1129,8 +1147,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.artist_results.show_all()
 
         # Playlists
-        if search_results.playlists:
-            self._remove_all_from_widget(self.playlist_results)
+        if search_results.playlists is not None:
             for playlist in search_results.playlists:
                 self.playlist_results.add(
                     self._create_search_result_row(
