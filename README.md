@@ -92,6 +92,21 @@ make run ARGS="-m debug"    # with debug logging
 
 ### macOS
 
+You'll need this based on your System Architecture :
+
+aarch64 : 
+```
+xcode-select --install
+brew install python@3 pygobject3 gtk+3 gobject-introspection adwaita-icon-theme librsvg mpv fontconfig
+make pkg
+```
+
+x86-64 :
+```
+xcode-select --install
+sudo port install python313 py313-pip py313-gobject3 gtk3 gobject-introspection adwaita-icon-theme librsvg mpv fontconfig
+```
+
 `make pkg` on a Mac builds a self-contained `Sublime Music.app` (Python, GTK, PyGObject,
 libmpv and all Python dependencies inside, built with PyInstaller) and wraps it in
 `dist/SublimeMusic-<version>-bundled.pkg`, which installs it into `/Applications`.
