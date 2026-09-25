@@ -97,6 +97,7 @@ Playing integration and the appearance check (bundled into the app, and installe
   so scrolling doesn't stutter while albums are added.
 
 **Notes**
+
 * Note on Chromecast fixes : I (crt0512) personally dont have any Chromecast devices at home,
   testing was done at my workplace where we do have them, forgot to take screenshots/pictures,
   might make them someday.
