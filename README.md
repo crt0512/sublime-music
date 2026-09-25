@@ -14,26 +14,7 @@ Sublime Music is a native, GTK3, Subsonic client for the Linux Desktop.
 
 The Albums tab of Sublime Music with the Play Queue opened.
 
-## Features and Optimizations
-
-### New Features :
-
-- The Songs tab: the whole library in one sortable, filterable table.
-- Clear Cue Button in Cue
-- Cue Replacement Warnings
-- Keyboard media key grabber so your browser doesnt steal media keys from you (on GNOME based stuff and MacOS, rest can still be stolen by your browser unfortunately)
-- Makefile and port to MacOS
-
-### Improvements and Bugfixes :
-
-- Better/Fixed Caching
-- Playlists not loading fixed
-- God knows how many other issues I stoped counting
-- Bugfixes on things I broke myself or that felt off.
-- Many many performance related fixes and improvements.
-
-
-### Existing Features
+## Features
 
 - Switch between multiple Subsonic API (v1.8.0+) compliant servers.
 - Play music through Chromecast devices on the same LAN.
@@ -42,6 +23,12 @@ The Albums tab of Sublime Music with the Play Queue opened.
 - Intuitive play queue.
 - Create/delete/edit playlists.
 - Download songs for offline listening.
+- The Songs tab: the whole library in one sortable, filterable table.
+- Cue Replacement Warnings
+- Makefile and port to MacOS
+- Many many many more... See :
+  - [Changelog](CHANGELOG.rst)
+  - [Screenshots](docs/screenshots.rst)
 
 ### Removed Features
 
