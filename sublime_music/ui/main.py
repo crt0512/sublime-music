@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import bleach
 from gi.repository import Gdk, GLib, GObject, Gtk, Pango
@@ -7,6 +7,7 @@ from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 from ..adapters import AdapterManager, DownloadProgress, Result, api_objects as API
 from ..config import MAX_PLAY_FROM_HERE_COUNT, AppConfiguration, ProviderConfiguration
 from ..players import PlayerManager
+from ..players.chromecast import ChromecastPlayer
 from ..ui import albums, artists, browse, player_controls, playlists, songs, util
 from ..ui.common import DigitsEntry, IconButton, IconMenuButton, SpinnerImage
 
@@ -42,6 +43,7 @@ class MainWindow(Gtk.ApplicationWindow):
         super().__init__(*args, **kwargs)
         self.set_default_size(1342, 756)
         self._last_search_query: Optional[str] = None
+        self._search_pending = False
 
         # Create the stack
         self.albums_panel = albums.AlbumsPanel()
@@ -204,6 +206,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.song_library_sync_interval_entry.set_value(
             app_config.song_library_sync_interval_minutes
         )
+        self.resume_prompt_timeout_entry.set_value(app_config.resume_prompt_timeout_seconds)
+        self.go_to_album_fallback_combo.set_active_id(app_config.go_to_album_fallback_sort)
+        self.chromecast_enabled_switch.set_active(app_config.chromecast_enabled)
 
         # Player settings
         for c in self.player_settings_box.get_children():
@@ -227,6 +232,8 @@ class MainWindow(Gtk.ApplicationWindow):
             )
 
         for player_name, options in player_manager.get_configuration_options().items():
+            if player_name == ChromecastPlayer.name and not app_config.chromecast_enabled:
+                continue
             self.player_settings_box.add(Gtk.Separator())
             self.player_settings_box.add(
                 self._create_label(f"{player_name} Settings", name="menu-settings-separator")
@@ -637,6 +644,27 @@ class MainWindow(Gtk.ApplicationWindow):
         box.get_style_context().add_class("menu-button")
         return box, entry
 
+    def _create_combo_menu_item(
+        self, label: str, options: Dict[str, str], settings_name: str
+    ) -> Tuple[Gtk.Box, Gtk.ComboBoxText]:
+        """A setting chosen from ``options`` (value -> label)."""
+
+        def on_change(combo: Gtk.ComboBoxText):
+            if (value := combo.get_active_id()) is not None:
+                self._emit_settings_change({settings_name: value})
+
+        box = Gtk.Box()
+        box.add(combo_label := Gtk.Label(label=label))
+        combo_label.get_style_context().add_class("menu-label")
+
+        combo = Gtk.ComboBoxText()
+        for value, option_label in options.items():
+            combo.append(value, option_label)
+        combo.connect("changed", on_change)
+        box.pack_end(combo, False, False, 0)
+        box.get_style_context().add_class("menu-button")
+        return box, combo
+
     def _create_downloads_popover(self) -> Gtk.PopoverMenu:
         menu = Gtk.PopoverMenu()
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, name="downloads-menu")
@@ -803,6 +831,36 @@ class MainWindow(Gtk.ApplicationWindow):
             "play_from_here_count",
         )
         vbox.add(play_from_here_count_box)
+        (
+            resume_prompt_timeout_box,
+            self.resume_prompt_timeout_entry,
+        ) = self._create_spin_button_menu_item(
+            "Hide Resume Prompt After (Seconds, 0 = Never)",
+            0,
+            600,
+            1,
+            "resume_prompt_timeout_seconds",
+        )
+        vbox.add(resume_prompt_timeout_box)
+
+        # ALBUMS SETTINGS
+        # ==============================================================================
+        vbox.add(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        vbox.add(self._create_label("Albums", name="menu-settings-separator"))
+        (
+            go_to_album_fallback_box,
+            self.go_to_album_fallback_combo,
+        ) = self._create_combo_menu_item(
+            "Go to Album From a Filtered View Sorts By",
+            {t.name: label for t, label in albums.ALBUM_SORTS_LISTING_EVERY_ALBUM.items()},
+            "go_to_album_fallback_sort",
+        )
+        go_to_album_fallback_box.set_tooltip_text(
+            "Going to an album keeps the albums' sort when it shows every album. From "
+            "one that shows only some (random, most played, most recently played, starred, "
+            "by year or by genre), it switches to this sort, so that the album is there."
+        )
+        vbox.add(go_to_album_fallback_box)
 
         # SONG LIBRARY SETTINGS
         # ==============================================================================
@@ -815,6 +873,15 @@ class MainWindow(Gtk.ApplicationWindow):
             "Auto-Sync Every (Minutes, 0 = Off)", 0, 1440, 5, "song_library_sync_interval_minutes"
         )
         vbox.add(song_library_sync_interval_box)
+
+        # DEVICES
+        # ==============================================================================
+        vbox.add(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        vbox.add(self._create_label("Devices", name="menu-settings-separator"))
+        chromecast_box, self.chromecast_enabled_switch = self._create_toggle_menu_button(
+            "Enable Chromecast", "chromecast_enabled"
+        )
+        vbox.add(chromecast_box)
 
         # PLAYER SETTINGS
         # ==============================================================================
@@ -860,21 +927,27 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         vbox.add(max_concurrent_downloads)
 
-        main_menu.add(vbox)
+        # As tall as the settings need, but scrollable when the window is too short to
+        # show them all (the height limit is set whenever the menu opens).
+        self.main_menu_scroll = Gtk.ScrolledWindow(
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            propagate_natural_height=True,
+            propagate_natural_width=True,
+        )
+        self.main_menu_scroll.add(vbox)
+        main_menu.add(self.main_menu_scroll)
         return main_menu
 
     def _create_search_popup(self) -> Gtk.PopoverMenu:
         self.search_popup = Gtk.PopoverMenu(modal=False)
 
-        results_scrollbox = Gtk.ScrolledWindow(
-            min_content_width=500,
-            min_content_height=700,
+        # Only as tall as the results need (up to 700px, less if the window is short),
+        # so that it is small before anything has been searched.
+        self.search_results_scroll = Gtk.ScrolledWindow(
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            propagate_natural_height=True,
+            max_content_height=700,
         )
-
-        def make_search_result_header(text: str) -> Gtk.Label:
-            label = self._create_label(text)
-            label.get_style_context().add_class("search-result-header")
-            return label
 
         search_results_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -883,32 +956,36 @@ class MainWindow(Gtk.ApplicationWindow):
         self.search_results_loading = Gtk.Spinner(active=False, name="search-spinner")
         search_results_box.add(self.search_results_loading)
 
-        search_results_box.add(make_search_result_header("Songs"))
-        self.song_results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        search_results_box.add(self.song_results)
+        # "Type to search" before searching, "No results" for an empty search. The
+        # headers and this are managed by _update_search_layout; no_show_all keeps
+        # show_all() from showing them regardless.
+        self.search_placeholder = Gtk.Label(name="search-placeholder", no_show_all=True)
+        search_results_box.add(self.search_placeholder)
 
-        search_results_box.add(make_search_result_header("Albums"))
-        self.album_results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        search_results_box.add(self.album_results)
+        self._search_sections: List[Tuple[Gtk.Label, Gtk.Box]] = []
+        for title in ("Songs", "Albums", "Artists", "Playlists"):
+            header = self._create_label(title)
+            header.get_style_context().add_class("search-result-header")
+            header.set_no_show_all(True)
+            results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            search_results_box.add(header)
+            search_results_box.add(results)
+            self._search_sections.append((header, results))
+        (
+            (_, self.song_results),
+            (_, self.album_results),
+            (_, self.artist_results),
+            (_, self.playlist_results),
+        ) = self._search_sections
 
-        search_results_box.add(make_search_result_header("Artists"))
-        self.artist_results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        search_results_box.add(self.artist_results)
-
-        search_results_box.add(make_search_result_header("Playlists"))
-        self.playlist_results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        search_results_box.add(self.playlist_results)
-
-        results_scrollbox.add(search_results_box)
-        self.search_popup.add(results_scrollbox)
+        self.search_results_scroll.add(search_results_box)
+        self.search_popup.add(self.search_results_scroll)
 
         self.search_popup.set_relative_to(self.search_entry)
-        rect = Gdk.Rectangle()
-        rect.x = 22
-        rect.y = 28
-        rect.width = 1
-        rect.height = 1
-        self.search_popup.set_pointing_to(rect)
+        # Point at the magnifier icon; the height is set in _show_search.
+        self._search_pointing = Gdk.Rectangle()
+        self._search_pointing.x = 22
+        self._search_pointing.width = 1
         self.search_popup.set_position(Gtk.PositionType.BOTTOM)
 
     # Event Listeners
@@ -930,6 +1007,13 @@ class MainWindow(Gtk.ApplicationWindow):
             self.player_controls.play_queue_popover,
         ):
             self.player_controls.play_queue_popover.popdown()
+
+        if not self._event_in_widgets(
+            event,
+            self.player_controls.info_button,
+            self.player_controls.info_popover,
+        ):
+            self.player_controls.info_popover.popdown()
 
         return False
 
@@ -972,7 +1056,13 @@ class MainWindow(Gtk.ApplicationWindow):
         self.server_connection_popover.popup()
         self.server_connection_popover.show_all()
 
-    def _on_main_menu_clicked(self, *args):
+    def _on_main_menu_clicked(self, button: Gtk.Widget, *args):
+        # The popover can't extend past the window: allow the space below the button,
+        # minus room for the popover's arrow and frame.
+        button_bottom = button.translate_coordinates(self, 0, button.get_allocated_height())
+        if button_bottom:
+            available = self.get_allocated_height() - button_bottom[1] - 40
+            self.main_menu_scroll.set_max_content_height(max(100, available))
         self.main_menu_popover.popup()
         self.main_menu_popover.show_all()
 
@@ -1002,13 +1092,16 @@ class MainWindow(Gtk.ApplicationWindow):
                 search.cancel()
 
         if not self.search_popup.is_visible():
-            self.search_popup.show_all()
-            self.search_popup.popup()
+            self._show_search()
 
         if query == "":
+            self._search_pending = False
             self._set_search_loading(False)
             self._clear_search_results()
             return
+
+        self._search_pending = True
+        self._update_search_layout()
 
         def search_result_calback(idx: int, result: API.SearchResult):
             # Ignore slow returned searches.
@@ -1017,20 +1110,25 @@ class MainWindow(Gtk.ApplicationWindow):
 
             GLib.idle_add(self._update_search_results, result)
 
-        def search_result_done(r: Result):
+        def search_result_done(idx: int, r: Result):
             if r.result() is True:
                 # The search was cancelled
                 return
 
-            # If all results are back, the stop the loading indicator.
-            GLib.idle_add(self._set_search_loading, False)
+            def done():
+                if idx == self.search_idx:
+                    self._search_pending = False
+                # If all results are back, the stop the loading indicator.
+                self._set_search_loading(False)
+
+            GLib.idle_add(done)
 
         search_result = AdapterManager.search(
             query,
             search_callback=partial(search_result_calback, self.search_idx),
             before_download=lambda: self._set_search_loading(True),
         )
-        search_result.add_done_callback(search_result_done)
+        search_result.add_done_callback(partial(search_result_done, self.search_idx))
         self.searches.add(search_result)
 
     def _on_search_entry_stop_search(self, entry: Any):
@@ -1043,10 +1141,35 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.emit("refresh-window", {"__settings__": changed_settings}, False)
 
+    SEARCH_ENTRY_WIDTH = 300  # while it has focus
+    SEARCH_POPOVER_EXTRA_WIDTH = -5  # how much wider the results are than the entry
+
     def _show_search(self):
-        self.search_entry.set_size_request(300, -1)
+        self.search_entry.set_size_request(self.SEARCH_ENTRY_WIDTH, -1)
+        # Make the popover's frame exactly as wide as the entry: the results get that
+        # width minus the popover's own padding and border.
+        style = self.search_popup.get_style_context()
+        padding = style.get_padding(style.get_state())
+        border = style.get_border(style.get_state())
+        frame = padding.left + padding.right + border.left + border.right
+        self.search_results_scroll.set_size_request(
+            self.SEARCH_ENTRY_WIDTH - frame + self.SEARCH_POPOVER_EXTRA_WIDTH, -1
+        )
+        # Open below the entry's full height, with the same gap as the header bar's other
+        # popovers (which point at their whole button).
+        self._search_pointing.y = 0
+        self._search_pointing.height = self.search_entry.get_allocated_height()
+        self.search_popup.set_pointing_to(self._search_pointing)
+        # The popover can't extend past the window: allow the space below the entry.
+        entry_bottom = self.search_entry.translate_coordinates(
+            self, 0, self.search_entry.get_allocated_height()
+        )
+        if entry_bottom:
+            available = self.get_allocated_height() - entry_bottom[1] - 40
+            self.search_results_scroll.set_max_content_height(max(100, min(700, available)))
         self.search_popup.show_all()
         self.search_results_loading.hide()
+        self._update_search_layout()
         self.search_popup.popup()
 
     def _hide_search(self):
@@ -1060,6 +1183,24 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             self.search_results_loading.stop()
             self.search_results_loading.hide()
+        self._update_search_layout()
+
+    def _update_search_layout(self):
+        """Shows only the headers of sections with results, or the placeholder."""
+        any_results = False
+        for header, results in self._search_sections:
+            has_results = len(results.get_children()) > 0
+            header.set_visible(has_results)
+            any_results |= has_results
+
+        if not self._last_search_query:
+            placeholder = "Type to search"
+        elif not any_results and not self._search_pending:
+            placeholder = "No results"
+        else:
+            placeholder = None
+        self.search_placeholder.set_text(placeholder or "")
+        self.search_placeholder.set_visible(placeholder is not None)
 
     def _remove_all_from_widget(self, widget: Gtk.Widget):
         for c in widget.get_children():
@@ -1095,6 +1236,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._remove_all_from_widget(self.album_results)
         self._remove_all_from_widget(self.artist_results)
         self._remove_all_from_widget(self.playlist_results)
+        self._update_search_layout()
 
     def _update_search_results(self, search_results: API.SearchResult):
         self._clear_search_results()
@@ -1159,6 +1301,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 )
 
             self.playlist_results.show_all()
+
+        self._update_search_layout()
 
     def _event_in_widgets(self, event: Gdk.EventButton, *widgets) -> bool:
         for widget in widgets:

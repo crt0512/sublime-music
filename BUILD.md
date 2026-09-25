@@ -86,6 +86,11 @@ sudo port install python313 py313-pip py313-gobject3 gtk3 gobject-introspection 
 `make pkg`
 - After which you'll find a runnable app in the build folder and an installable pkg in the dist folder
 
+If you've got both Homebrew and MacPorts installed, `make pkg` defaults to Homebrew (`MACOS_PKGMGR=auto`). If you dont want that orce one with `MACOS_PKGMGR=brew` or `MACOS_PKGMGR=macports`, e.g.:
+```bash
+make pkg MACOS_PKGMGR=macports
+```
+
 ### Troubleshootin on Mac :
 If your app doesnt launch after building on x86-64-v3 (Intel) just in case try installing [Xquartz](https://www.xquartz.org) and try opening the App after installing that, if it launches with that installed, If it does you managed to miss the "making MacPorts not use X11 for everything" step (like I did at first too), to fix do this in order :
 ```bash
@@ -102,7 +107,7 @@ make pkg
 ```
 Then install the newly generated pkg file and the app should run.
 
-If you use `make pkg BUNDLE=0` it builds a thin app that uses the Homebrew/MacPorts Python and GTK instead of bundling it in.
+If you use `make pkg BUNDLE=0` it builds a thin app that uses the Homebrew/MacPorts Python and GTK instead of bundling it in (same `MACOS_PKGMGR`/`MACOS_PREFIX` picks which one).
 
 ## Bundles Explained
 Normally installing Sublime Music requires alot of dependencies via the Systems Package manager. This is something that is not always available or feasable, For example I cant expect someone on an Intel Mac to wait 45 Minutes during which their CPU reaches temparatures hot enough to Cook with or if you want to run this somewhat portably on a platform where you either dont have a package manager or cant modify the root partition.

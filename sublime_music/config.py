@@ -157,6 +157,18 @@ class AppConfiguration(DataClassJsonMixin):
     # Song library: sync it automatically every so many minutes (0 = only by hand).
     song_library_sync_interval_minutes: int = 0
 
+    # Chromecast support. Off means no device discovery, no LAN file server and no
+    # device button at all.
+    chromecast_enabled: bool = True
+
+    # "Go to album" keeps the current album sort when it lists every album; from a view
+    # that shows only some (starred, by genre...), it switches to this one instead. The
+    # name of an AlbumSearchQuery.Type that lists every album.
+    go_to_album_fallback_sort: str = "NEWEST"
+
+    # Hide the "resume the play queue?" prompt after this many seconds (0 = never).
+    resume_prompt_timeout_seconds: int = 5
+
     # Deprecated. These have also been renamed to avoid using them elsewhere in the app.
     _sol: bool = field(default=True, metadata=config(field_name="serve_over_lan"))
     _pn: int = field(default=8282, metadata=config(field_name="port_number"))

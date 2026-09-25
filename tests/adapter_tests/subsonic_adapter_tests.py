@@ -708,3 +708,29 @@ def test_set_song_starred_uses_star_and_unstar(adapter: SubsonicAdapter):
     adapter.set_song_starred("tr-1", True)
     adapter.set_song_starred("tr-1", False)
     assert calls == [("star.view", {"id": "tr-1"}), ("unstar.view", {"id": "tr-1"})]
+
+
+def test_get_album_sorts_songs_by_disc_and_track(adapter: SubsonicAdapter):
+    # As some servers list a multi-disc album: grouped oddly, disc 2 first.
+    songs = [
+        {"id": "d2t1", "title": "x", "discNumber": 2, "track": 1},
+        {"id": "d1t2", "title": "x", "discNumber": 1, "track": 2},
+        {"id": "untagged", "title": "x"},
+        {"id": "d2t2", "title": "x", "discNumber": 2, "track": 2},
+        {"id": "d1t1", "title": "x", "discNumber": 1, "track": 1},
+    ]
+    adapter._set_mock_data(mock_json(album={"id": "al", "name": "Big", "song": songs}))
+    album = adapter.get_album("al")
+    assert [s.id for s in album.songs] == ["untagged", "d1t1", "d1t2", "d2t1", "d2t2"]
+
+
+def test_set_album_starred_uses_album_id(adapter: SubsonicAdapter):
+    calls = []
+
+    def record(url: str, **params: Any) -> None:
+        calls.append((url.rsplit("/", 1)[-1], params))
+
+    adapter._get_json = record  # type: ignore
+    adapter.set_album_starred("al-1", True)
+    adapter.set_album_starred("al-1", False)
+    assert calls == [("star.view", {"albumId": "al-1"}), ("unstar.view", {"albumId": "al-1"})]

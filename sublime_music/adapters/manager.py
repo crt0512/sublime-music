@@ -1303,6 +1303,27 @@ class AdapterManager:
             result.add_done_callback(on_done)
         return result
 
+    @staticmethod
+    def can_set_album_starred() -> bool:
+        return AdapterManager._ground_truth_can_do("set_album_starred")
+
+    @staticmethod
+    def set_album_starred(album_id: str, starred: bool) -> Result[None]:
+        assert AdapterManager._instance
+        result = AdapterManager._create_ground_truth_result("set_album_starred", album_id, starred)
+        if AdapterManager._instance.caching_adapter:
+            caching_adapter: CachingAdapter = AdapterManager._instance.caching_adapter
+
+            def on_done(future: Result):
+                if future.cancelled() or future.exception() is not None:
+                    return
+                caching_adapter.ingest_new_data(
+                    CachingAdapter.CachedDataKey.ALBUM_STARRED, album_id, starred
+                )
+
+            result.add_done_callback(on_done)
+        return result
+
     # Song Library
     @staticmethod
     def can_sync_song_library() -> bool:

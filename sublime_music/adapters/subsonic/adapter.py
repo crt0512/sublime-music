@@ -404,6 +404,10 @@ class SubsonicAdapter(Adapter):
     def can_set_song_starred(self) -> bool:
         return self.version_at_least("1.8.0")
 
+    @property
+    def can_set_album_starred(self) -> bool:
+        return self.version_at_least("1.8.0")
+
     _schemes = None
 
     @property
@@ -785,7 +789,8 @@ class SubsonicAdapter(Adapter):
             extra_args = {"genre": query.genre.name}
 
         albums: List[API.Album] = []
-        page_size = 50 if query.type == AlbumSearchQuery.Type.RANDOM else 500
+        # Random is a single request; ask for enough to fill the largest page (100).
+        page_size = 100 if query.type == AlbumSearchQuery.Type.RANDOM else 500
         offset = 0
 
         def get_page(offset: int) -> Sequence[API.Album]:
@@ -810,6 +815,10 @@ class SubsonicAdapter(Adapter):
     def get_album(self, album_id: str) -> API.Album:
         album = self._get_json(self._make_url("getAlbum"), id=album_id).album
         assert album, f"Error getting album {album_id}"
+        # Servers don't all list multi-disc albums in disc/track order. Sort like the
+        # cache does (models.Album.songs), so an album shows the same order whether it
+        # came from the server or the cache.
+        album.songs.sort(key=lambda s: (s.disc_number or 1, s.track or 0))
         return album
 
     def _get_indexes(self) -> API.Directory:
@@ -847,6 +856,11 @@ class SubsonicAdapter(Adapter):
 
     def set_song_starred(self, song_id: str, starred: bool):
         self._get_json(self._make_url("star" if starred else "unstar"), id=song_id)
+
+    def set_album_starred(self, album_id: str, starred: bool):
+        # Albums from getAlbumList2/getAlbum are ID3 albums, which star/unstar take as
+        # albumId (id= would be read as a song or folder).
+        self._get_json(self._make_url("star" if starred else "unstar"), albumId=album_id)
 
     def save_play_queue(
         self,

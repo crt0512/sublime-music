@@ -1292,6 +1292,26 @@ def test_song_starred_ingestion(cache_adapter: FilesystemAdapter):
     assert cache_adapter.get_song_details("tr-1").starred is None
 
 
+def test_album_starred_ingestion(cache_adapter: FilesystemAdapter):
+    cache_adapter.ingest_new_data(
+        KEYS.ALBUM,
+        "a1",
+        SubsonicAPI.Album(id="a1", name="foo", songs=MOCK_SUBSONIC_SONGS[:2]),
+    )
+    assert cache_adapter.get_album("a1").starred is None
+
+    cache_adapter.ingest_new_data(KEYS.ALBUM_STARRED, "a1", True)
+    assert cache_adapter.get_album("a1").starred is not None
+    # Starring the album doesn't star its songs.
+    assert all(s.starred is None for s in cache_adapter.get_album("a1").songs or [])
+
+    cache_adapter.ingest_new_data(KEYS.ALBUM_STARRED, "a1", False)
+    assert cache_adapter.get_album("a1").starred is None
+
+    # An album that isn't cached is simply skipped.
+    cache_adapter.ingest_new_data(KEYS.ALBUM_STARRED, "not-cached", True)
+
+
 def test_song_played_ingestion_and_resync(cache_adapter: FilesystemAdapter):
     songs = _library_songs(3)
     for song in songs:

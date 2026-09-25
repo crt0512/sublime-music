@@ -22,13 +22,28 @@
 #             python3-* packages instead (see THIN_DEPENDS below).
 #
 # Variables you may want to override: PYTHON, PREFIX (default /usr/local for
-# install, always /usr for deb), DESTDIR, BUNDLE, MAINTAINER, MACOS_PREFIX.
+# install, always /usr for deb), DESTDIR, BUNDLE, MAINTAINER, MACOS_PKGMGR,
+# MACOS_PREFIX.
 
 # macOS: where GTK, PyGObject and libmpv come from, Homebrew (brew --prefix) or
-# MacPorts (/opt/local). MACOS_PYTHON is the first python3 in that prefix that can
-# import PyGObject (MacPorts has no bare python3, only python3.13 and so on).
+# MacPorts (port's prefix). MACOS_PKGMGR picks which one: brew, macports, or auto
+# (default) to prefer whichever is installed, trying Homebrew first (MacPorts'
+# packages are sometimes newer/more stable, so set MACOS_PKGMGR=macports to build
+# against those instead when both are installed). MACOS_PREFIX overrides the
+# resulting prefix directly and skips this detection. MACOS_PYTHON is the first
+# python3 in that prefix that can import PyGObject (MacPorts has no bare python3,
+# only python3.13 and so on).
 ifeq ($(shell uname),Darwin)
-MACOS_PREFIX ?= $(or $(shell brew --prefix 2>/dev/null),$(patsubst %/bin/port,%,$(shell command -v port 2>/dev/null)))
+MACOS_PKGMGR ?= auto
+MACOS_BREW_PREFIX     := $(shell brew --prefix 2>/dev/null)
+MACOS_MACPORTS_PREFIX := $(patsubst %/bin/port,%,$(shell command -v port 2>/dev/null))
+ifeq ($(MACOS_PKGMGR),brew)
+MACOS_PREFIX ?= $(MACOS_BREW_PREFIX)
+else ifeq ($(MACOS_PKGMGR),macports)
+MACOS_PREFIX ?= $(MACOS_MACPORTS_PREFIX)
+else
+MACOS_PREFIX ?= $(or $(MACOS_BREW_PREFIX),$(MACOS_MACPORTS_PREFIX))
+endif
 MACOS_PYTHON := $(shell for p in $(MACOS_PREFIX)/bin/python3 $(MACOS_PREFIX)/bin/python3.[0-9]*; do \
     case $$p in (*-config) continue;; esac; \
     [ -x $$p ] && $$p -c 'import gi' 2>/dev/null && { echo $$p; break; }; done)
@@ -92,7 +107,7 @@ help: ## Show this help
 	@echo
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | sed 's/:.*## /|/' | sort | awk -F'|' '{printf "  %-12s %s\n", $$1, $$2}'
 	@echo
-	@echo "Variables: PYTHON=$(PYTHON) PREFIX=$(PREFIX) DESTDIR=$(DESTDIR) BUNDLE=$(BUNDLE)"
+	@echo "Variables: PYTHON=$(PYTHON) PREFIX=$(PREFIX) DESTDIR=$(DESTDIR) BUNDLE=$(BUNDLE)$(if $(filter Darwin,$(shell uname)), MACOS_PKGMGR=$(MACOS_PKGMGR) MACOS_PREFIX=$(MACOS_PREFIX))"
 
 # ----------------------------------------------------------------------------
 # Building

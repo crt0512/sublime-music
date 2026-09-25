@@ -1,5 +1,5 @@
 from random import randint
-from typing import Any, List, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 
 from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 
@@ -12,10 +12,14 @@ from .load_error import LoadError
 from .song_list_column import SongListColumn
 from .spinner_image import SpinnerImage
 
+STARRED_ICON = {True: "starred-symbolic", False: "non-starred-symbolic"}
+
 
 class AlbumWithSongs(Gtk.Box):
     __gsignals__ = {
         "song-selected": (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, ()),
+        # The album was starred (True) or unstarred (False).
+        "album-starred": (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (bool,)),
         "song-clicked": (
             GObject.SignalFlags.RUN_FIRST,
             GObject.TYPE_NONE,
@@ -31,38 +35,42 @@ class AlbumWithSongs(Gtk.Box):
         cover_art_size: int = 200,
         show_artist_name: bool = True,
         offline_mode: Optional[bool] = None,
+        current_song_id: Optional[str] = None,
     ):
         """
         :param offline_mode: whether the app is in offline mode. Without it the first
             song list is rendered as if offline (uncached songs unplayable) until
             ``update`` is called with the app config.
+        :param current_song_id: the song in the player, whose title is shown in bold;
+            ``update`` keeps it current afterwards.
         """
         Gtk.Box.__init__(self, orientation=Gtk.Orientation.HORIZONTAL)
         self.album = album
         if offline_mode is not None:
             self.offline_mode = offline_mode
+        self.current_song_id = current_song_id
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        artist_artwork = SpinnerImage(
+        self.artwork = SpinnerImage(
             loading=False,
             image_name="artist-album-list-artwork",
             spinner_name="artist-artwork-spinner",
             image_size=cover_art_size,
         )
         # Account for 10px margin on all sides with "+ 20".
-        artist_artwork.set_size_request(cover_art_size + 20, cover_art_size + 20)
-        box.pack_start(artist_artwork, False, False, 0)
+        self.artwork.set_size_request(cover_art_size + 20, cover_art_size + 20)
+        box.pack_start(self.artwork, False, False, 0)
         box.pack_start(Gtk.Box(), True, True, 0)
         self.pack_start(box, False, False, 0)
 
         def cover_art_future_done(f: Result):
-            artist_artwork.set_from_file(f.result())
-            artist_artwork.set_loading(False)
+            self.artwork.set_from_file(f.result())
+            self.artwork.set_loading(False)
 
         cover_art_filename_future = AdapterManager.get_cover_art_uri(
             album.cover_art,
             "file",
-            before_download=lambda: artist_artwork.set_loading(True),
+            before_download=lambda: self.artwork.set_loading(True),
         )
         cover_art_filename_future.add_done_callback(
             lambda f: GLib.idle_add(cover_art_future_done, f)
@@ -111,6 +119,14 @@ class AlbumWithSongs(Gtk.Box):
         )
         album_title_and_buttons.pack_start(self.add_to_queue_btn, False, False, 5)
 
+        self.album_starred = album.starred is not None
+        # Hidden until we know the server supports it; no_show_all keeps show_all() off.
+        self.star_album_btn = IconButton(None, no_show_all=True)
+        self.star_album_btn.get_child().show_all()
+        self.star_album_btn.connect("clicked", self.on_star_album_clicked)
+        self._show_album_starred()
+        album_title_and_buttons.pack_start(self.star_album_btn, False, False, 5)
+
         self.download_all_btn = IconButton(
             "folder-download-symbolic",
             "Download all songs in this album",
@@ -142,8 +158,13 @@ class AlbumWithSongs(Gtk.Box):
         self.error_container = Gtk.Box()
         album_details.add(self.error_container)
 
-        # clickable, cache status, title, duration, song ID
-        self.album_song_store = Gtk.ListStore(bool, str, str, str, str)
+        # Star changes that the server hasn't confirmed yet, so that a refresh of the
+        # song list in the meantime doesn't flip the stars back.
+        self._pending_song_stars: Dict[str, bool] = {}
+        self._pending_album_star: Optional[bool] = None
+
+        # clickable, cache status, title, duration, star icon, title weight, song ID
+        self.album_song_store = Gtk.ListStore(bool, str, str, str, str, int, str)
 
         self.album_songs = Gtk.TreeView(
             model=self.album_song_store,
@@ -158,15 +179,21 @@ class AlbumWithSongs(Gtk.Box):
         selection.set_mode(Gtk.SelectionMode.MULTIPLE)
         selection.set_select_function(lambda _, model, path, current: model[path[0]][0])
 
+        star_renderer = Gtk.CellRendererPixbuf()
+        star_renderer.set_fixed_size(30, 35)
+        self.star_column = Gtk.TreeViewColumn("", star_renderer, icon_name=4)
+        self.star_column.set_visible(False)
+        self.album_songs.append_column(self.star_column)
+
+        self.album_songs.append_column(SongListColumn("TITLE", 2, weight_idx=5))
+        self.album_songs.append_column(SongListColumn("DURATION", 3, align=1, width=40))
+
         # Song status column.
         renderer = Gtk.CellRendererPixbuf()
         renderer.set_fixed_size(30, 35)
         column = Gtk.TreeViewColumn("", renderer, icon_name=1)
         column.set_resizable(True)
         self.album_songs.append_column(column)
-
-        self.album_songs.append_column(SongListColumn("TITLE", 2, bold=True))
-        self.album_songs.append_column(SongListColumn("DURATION", 3, align=1, width=40))
 
         self.album_songs.connect("row-activated", self.on_song_activated)
         self.album_songs.connect("button-press-event", self.on_song_button_press)
@@ -195,6 +222,24 @@ class AlbumWithSongs(Gtk.Box):
         )
 
     def on_song_button_press(self, tree: Any, event: Gdk.EventButton) -> bool:
+        viewport = tree.get_ancestor(Gtk.Viewport)
+        if viewport and not tree.is_focus():
+            # GTK 3's viewport scrolls to whatever takes focus, so the first click into
+            # the list would jump the page to the top of the list. Take focus here and
+            # keep the scroll position; the default handler then won't move focus again.
+            vadjustment = viewport.props.vadjustment
+            scroll_position = vadjustment.get_value()
+            tree.grab_focus()
+            vadjustment.set_value(scroll_position)
+
+        if event.button == 1 and self.star_column.get_visible():
+            clicked = tree.get_path_at_pos(event.x, event.y)
+            if clicked and clicked[1] is self.star_column:
+                # Don't select or play the row (a double click is two presses too).
+                if event.type == Gdk.EventType.BUTTON_PRESS:
+                    self.toggle_song_starred(clicked[0].get_indices()[0])
+                return True
+
         if event.button == 3:  # Right click
             clicked_path = tree.get_path_at_pos(event.x, event.y)
             if not clicked_path:
@@ -232,6 +277,62 @@ class AlbumWithSongs(Gtk.Box):
                 return True
 
         return False
+
+    def toggle_song_starred(self, index: int):
+        if self.offline_mode:
+            return
+        song_id = self.album_song_store[index][-1]
+        starred = self.album_song_store[index][4] != STARRED_ICON[True]
+        self._pending_song_stars[song_id] = starred
+        self._set_song_star_icon(song_id, starred)
+
+        def on_done(result: Result):
+            failed = result.exception() is not None
+            GLib.idle_add(self._song_star_done, song_id, starred, failed)
+
+        AdapterManager.set_song_starred(song_id, starred).add_done_callback(on_done)
+
+    def _song_star_done(self, song_id: str, starred: bool, failed: bool):
+        # Only if no newer click on this song is still waiting for the server.
+        if self._pending_song_stars.get(song_id) == starred:
+            del self._pending_song_stars[song_id]
+            if failed:
+                self._set_song_star_icon(song_id, not starred)
+
+    def _set_song_star_icon(self, song_id: str, starred: bool):
+        for row in self.album_song_store:
+            if row[-1] == song_id:
+                row[4] = STARRED_ICON[starred]
+
+    def on_star_album_clicked(self, btn: Any):
+        starred = not self.album_starred
+        self._pending_album_star = starred
+        self._set_album_starred(starred)
+
+        def on_done(result: Result):
+            failed = result.exception() is not None
+            GLib.idle_add(self._album_star_done, starred, failed)
+
+        AdapterManager.set_album_starred(self.album.id, starred).add_done_callback(on_done)
+
+    def _album_star_done(self, starred: bool, failed: bool):
+        if self._pending_album_star == starred:
+            self._pending_album_star = None
+            if failed:
+                self._set_album_starred(not starred)
+
+    def _set_album_starred(self, starred: bool):
+        changed = starred != self.album_starred
+        self.album_starred = starred
+        self._show_album_starred()
+        if changed:
+            self.emit("album-starred", starred)
+
+    def _show_album_starred(self):
+        self.star_album_btn.set_icon(STARRED_ICON[self.album_starred])
+        self.star_album_btn.set_tooltip_text(
+            "Unstar this album" if self.album_starred else "Star this album"
+        )
 
     def on_download_all_click(self, btn: Any):
         AdapterManager.batch_download_songs(
@@ -273,6 +374,8 @@ class AlbumWithSongs(Gtk.Box):
                     self.error_container.remove(c)
 
             self.offline_mode = app_config.offline_mode
+            current_song = app_config.state.current_song
+            self.current_song_id = current_song.id if current_song else None
 
         self.update_album_songs(self.album.id, app_config=app_config, force=force)
 
@@ -329,12 +432,19 @@ class AlbumWithSongs(Gtk.Box):
                     "folder-download-symbolic",
                     "view-pin-symbolic",
                 )
+                starred = self._pending_song_stars.get(song.id, song.starred is not None)
                 new_store.append(
                     [
                         playable,
                         status,
                         song.title or "",
                         util.format_song_duration(song.duration),
+                        STARRED_ICON[starred],
+                        int(
+                            Pango.Weight.BOLD
+                            if song.id == self.current_song_id
+                            else Pango.Weight.NORMAL
+                        ),
                         song.id,
                     ]
                 )
@@ -342,6 +452,12 @@ class AlbumWithSongs(Gtk.Box):
 
             song_ids = [cast(str, song[-1]) for song in new_store]
             util.diff_song_store(self.album_song_store, new_store)
+
+        self.star_column.set_visible(AdapterManager.can_set_song_starred())
+        if self._pending_album_star is None:
+            self._set_album_starred(album.starred is not None)
+        self.star_album_btn.set_visible(AdapterManager.can_set_album_starred())
+        self.star_album_btn.set_sensitive(not self.offline_mode)
 
         self.play_btn.set_sensitive(any_song_playable)
         self.shuffle_btn.set_sensitive(any_song_playable)

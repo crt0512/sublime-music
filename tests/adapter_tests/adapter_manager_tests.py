@@ -338,6 +338,7 @@ def test_set_song_starred_and_rating_update_the_cache(adapter_manager: AdapterMa
     server._set_mock_data(iter([_ok_response(), _ok_response(), _ok_response()]))
 
     AdapterManager.set_song_starred("tr-1", True).result()
+    sleep(0.2)  # the cache update runs in the done callback
     assert AdapterManager.get_song_details("tr-1").result().starred is not None
 
     song = AdapterManager.get_song_details("tr-1").result()

@@ -46,7 +46,6 @@ else:
 
 from .adapters import (
     AdapterManager,
-    AlbumSearchQuery,
     CacheMissError,
     DownloadProgress,
     Result,
@@ -58,7 +57,9 @@ from .dbus import DBusManager, dbus_propagate
 from .desktop_media_keys import DesktopMediaKeys
 from .macos_media import MacOSMediaSession
 from .players import PlayerDeviceEvent, PlayerEvent, PlayerManager
+from .players.chromecast import ChromecastPlayer
 from .ui import util
+from .ui.albums import go_to_album_query
 from .ui.configure_provider import ConfigureProviderDialog
 from .ui.main import MainWindow
 from .ui.state import RepeatType, UIState
@@ -421,6 +422,9 @@ class SublimeMusicApp(Gtk.Application):
 
             self.update_window()
 
+        if not self.app_config.chromecast_enabled:
+            # The saved device may be a Chromecast, which won't be discovered now.
+            self.app_config.state.current_device = "this device"
         self.app_config.state.connecting_to_device = True
 
         def check_if_connected():
@@ -437,6 +441,7 @@ class SublimeMusicApp(Gtk.Application):
             on_player_event,
             lambda *a: GLib.idle_add(player_device_change_callback, *a),
             self.app_config.player_config,
+            chromecast_enabled=self.app_config.chromecast_enabled,
         )
         GLib.timeout_add(10000, check_if_connected)
         GLib.timeout_add_seconds(60, self.check_song_library_sync)
@@ -685,6 +690,8 @@ class SublimeMusicApp(Gtk.Application):
                 setattr(self.app_config, k, v)
             if (offline_mode := settings.get("offline_mode")) is not None:
                 AdapterManager.on_offline_mode_change(offline_mode)
+            if (chromecast_enabled := settings.get("chromecast_enabled")) is not None:
+                self._set_chromecast_enabled(chromecast_enabled)
 
             del state_updates["__settings__"]
             self.app_config.save()
@@ -704,6 +711,16 @@ class SublimeMusicApp(Gtk.Application):
             # get to shut down cleanly.
             self.app_config.save()
         self.update_window(force=force)
+
+    def _set_chromecast_enabled(self, enabled: bool):
+        if not (pm := self.player_manager):
+            return
+        if not enabled:
+            # Move playback back to this computer before the Chromecast player goes.
+            if self.app_config.state.current_device != "this device":
+                self.on_device_update(None, "this device")
+            self.app_config.state.available_players[ChromecastPlayer] = set()
+        pm.set_chromecast_enabled(enabled)
 
     def on_notification_closed(self, _):
         self.app_config.state.current_notification = None
@@ -888,11 +905,9 @@ class SublimeMusicApp(Gtk.Application):
         self.update_window()
 
     def on_go_to_album(self, action: Any, album_id: GLib.Variant):
-        # Switch to the Alphabetical by Name view to guarantee that the album is there.
-        self.app_config.state.current_album_search_query = AlbumSearchQuery(
-            AlbumSearchQuery.Type.ALPHABETICAL_BY_NAME,
-            genre=self.app_config.state.current_album_search_query.genre,
-            year_range=self.app_config.state.current_album_search_query.year_range,
+        self.app_config.state.current_album_search_query = go_to_album_query(
+            self.app_config.state.current_album_search_query,
+            self.app_config.go_to_album_fallback_sort,
         )
 
         self.app_config.state.current_tab = "albums"
@@ -1093,9 +1108,10 @@ class SublimeMusicApp(Gtk.Application):
                     markup="<b>Unable to star song.</b>",
                     icon="dialog-error",
                 )
-                self.update_window()
-            elif self.window:
-                self.window.player_controls.update_starred(starred)
+            # Refresh everything, not just the player's star: open song lists (an album,
+            # say) show the star too. The cache has the new state by now, since
+            # set_song_starred's own callback that updates it runs first.
+            self.update_window()
 
         song.starred = datetime.now().astimezone() if starred else None
         AdapterManager.set_song_starred(song.id, starred).add_done_callback(on_done)
@@ -1176,11 +1192,9 @@ class SublimeMusicApp(Gtk.Application):
             window.destroy()
             return False
 
-        # Allow spaces to work in the text entry boxes.
-        if (
-            window.search_entry.has_focus()
-            or window.playlists_panel.playlist_list.new_playlist_entry.has_focus()
-        ):
+        # Typing in a text field (any search box, the playlist name, a number setting...)
+        # needs space, Home and End for itself.
+        if isinstance(window.get_focus(), (Gtk.Editable, Gtk.TextView)):
             return False
 
         # Spacebar, home/prev
@@ -1379,11 +1393,22 @@ class SublimeMusicApp(Gtk.Application):
                         resume_text += f" at {changed_str}"
                 resume_text += "?"
 
-                self.app_config.state.current_notification = UIState.UINotification(
+                notification = UIState.UINotification(
                     markup=f"<b>{resume_text}</b>",
                     actions=(("Resume", partial(do_resume, True)),),
                 )
+                self.app_config.state.current_notification = notification
                 self.update_window()
+
+                def hide_resume_prompt() -> bool:
+                    # Unless something else is being shown by now.
+                    if self.app_config.state.current_notification is notification:
+                        self.app_config.state.current_notification = None
+                        self.update_window()
+                    return False
+
+                if (timeout := self.app_config.resume_prompt_timeout_seconds) > 0:
+                    GLib.timeout_add_seconds(timeout, hide_resume_prompt)
 
             else:  # just resume the play queue immediately
                 do_resume(False)

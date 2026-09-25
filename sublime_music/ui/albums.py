@@ -1,5 +1,4 @@
 import datetime
-import itertools
 import logging
 import math
 from typing import Any, Callable, Iterable, List, Optional, Tuple, cast
@@ -10,6 +9,50 @@ from ..adapters import AdapterManager, AlbumSearchQuery, CacheMissError, Result,
 from ..config import AppConfiguration
 from ..ui import util
 from ..ui.common import AlbumWithSongs, DigitsEntry, IconButton, LoadError, SpinnerImage
+
+# The sorts that list every album (the others show only some: starred, one genre, the
+# played ones...), and their names in the settings.
+ALBUM_SORTS_LISTING_EVERY_ALBUM = {
+    AlbumSearchQuery.Type.NEWEST: "Recently Added",
+    AlbumSearchQuery.Type.ALPHABETICAL_BY_NAME: "Album Name",
+    AlbumSearchQuery.Type.ALPHABETICAL_BY_ARTIST: "Artist Name",
+}
+
+
+# The "All" albums-per-page option: no pages, the next ALL_ALBUMS_BATCH albums are shown
+# whenever the list is scrolled near its end.
+ALL_ALBUMS = 0
+ALL_ALBUMS_BATCH = 50
+# With "All", at most this many albums are shown at once (more makes opening and closing
+# albums laggy): scrolling on drops albums at the other end, which come back when
+# scrolling back to them.
+MAX_LOADED_ALBUMS = 200
+
+
+def go_to_album_query(query: AlbumSearchQuery, fallback_sort: str) -> AlbumSearchQuery:
+    """
+    The album query to show when going to an album: ``query`` if it lists every album,
+    otherwise the ``fallback_sort`` (a Type name; recently added if it isn't valid).
+
+    >>> T = AlbumSearchQuery.Type
+    >>> go_to_album_query(AlbumSearchQuery(T.ALPHABETICAL_BY_ARTIST), "NEWEST").type
+    <Type.ALPHABETICAL_BY_ARTIST: 6>
+    >>> go_to_album_query(AlbumSearchQuery(T.STARRED), "NEWEST").type
+    <Type.NEWEST: 1>
+    >>> go_to_album_query(AlbumSearchQuery(T.GENRE), "ALPHABETICAL_BY_NAME").type
+    <Type.ALPHABETICAL_BY_NAME: 5>
+    >>> go_to_album_query(AlbumSearchQuery(T.RANDOM), "STARRED").type
+    <Type.NEWEST: 1>
+    >>> go_to_album_query(AlbumSearchQuery(T.RECENT), "nonsense").type
+    <Type.NEWEST: 1>
+    """
+    if query.type in ALBUM_SORTS_LISTING_EVERY_ALBUM:
+        return query
+    fallback = AlbumSearchQuery.Type.__members__.get(fallback_sort, AlbumSearchQuery.Type.NEWEST)
+    if fallback not in ALBUM_SORTS_LISTING_EVERY_ALBUM:
+        fallback = AlbumSearchQuery.Type.NEWEST
+    # Keep the genre and years, so that switching back to those views restores them.
+    return AlbumSearchQuery(fallback, genre=query.genre, year_range=query.year_range)
 
 
 def _to_type(query_type: AlbumSearchQuery.Type) -> str:
@@ -68,7 +111,7 @@ class AlbumsPanel(Gtk.Box):
         actionbar = Gtk.ActionBar()
 
         # Sort by
-        actionbar.add(Gtk.Label(label="Sort"))
+        actionbar.add(Gtk.Label(label="Sort / Filter"))
         self.sort_type_combo, self.sort_type_combo_store = self.make_combobox(
             (
                 ("random", "randomly", True),
@@ -114,7 +157,7 @@ class AlbumsPanel(Gtk.Box):
         actionbar.pack_start(self.sort_toggle)
 
         # Add the page widget.
-        page_widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        self.page_widget = page_widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         self.prev_page = IconButton(
             "go-previous-symbolic", "Go to the previous page", sensitive=False
         )
@@ -142,7 +185,8 @@ class AlbumsPanel(Gtk.Box):
 
         actionbar.pack_end(Gtk.Label(label="albums per page"))
         self.show_count_dropdown, _ = self.make_combobox(
-            ((x, x, True) for x in ("20", "30", "40", "50")),
+            [(x, x, True) for x in ("20", "30", "40", "50", "75", "100")]
+            + [(str(ALL_ALBUMS), "All", True)],
             self.on_show_count_dropdown_change,
         )
         actionbar.pack_end(self.show_count_dropdown)
@@ -257,6 +301,8 @@ class AlbumsPanel(Gtk.Box):
 
         self.prev_page.set_sensitive(self.album_page > 0)
         self.page_entry.set_text(str(self.album_page + 1))
+        # "All" has no pages: it loads more albums as you scroll.
+        self.page_widget.set_visible(self.album_page_size != ALL_ALBUMS)
 
         # Show/hide the combo boxes.
         def show_if(sort_type: Iterable[AlbumSearchQuery.Type], *elements):
@@ -483,6 +529,9 @@ class AlbumsGrid(Gtk.Overlay):
     class _AlbumModel(GObject.Object):
         def __init__(self, album: API.Album):
             self.album = album
+            # The star next to the title in this album's tile (the latest tile, as the
+            # grids rebuild tiles when albums move between them).
+            self.star_icon: Optional[Gtk.Image] = None
             super().__init__()
 
         @property
@@ -501,6 +550,7 @@ class AlbumsGrid(Gtk.Overlay):
 
     currently_selected_index: Optional[int] = None
     currently_selected_id: Optional[str] = None
+    current_song_id: Optional[str] = None
     # A reflow waiting for the details of another album to finish closing, see
     # reflow_grids: (force_reload_from_master, selected_index, models).
     _pending_reflow: Optional[Tuple[bool, int, Optional[List["_AlbumModel"]]]] = None
@@ -535,8 +585,25 @@ class AlbumsGrid(Gtk.Overlay):
 
         self.items_per_row = 4
 
-        scrolled_window = Gtk.ScrolledWindow()
+        self.scrolled_window = scrolled_window = Gtk.ScrolledWindow()
         grid_detail_grid_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._scroll_content = grid_detail_grid_box
+        self._scroll_tick_id: Optional[int] = None
+        self._scroll_start_time: Optional[int] = None
+        self._scroll_start_value = 0.0
+        self._scroll_last_value = 0.0
+
+        # With "All": which albums are shown (from window_start, loaded_count of them).
+        self.window_start = 0
+        self.loaded_count = ALL_ALBUMS_BATCH
+        self._load_more_pending = False
+        self._hold: Optional[Tuple["AlbumsGrid._AlbumModel", float, bool]] = None
+        # While switching albums the content keeps its height (see _keep_height).
+        self._height_kept = False
+        grid_detail_grid_box.connect("size-allocate", self._on_content_allocated)
+        vadjustment = scrolled_window.get_vadjustment()
+        vadjustment.connect("value-changed", self._on_scroll_changed)
+        vadjustment.connect("changed", self._on_scroll_changed)
 
         self.error_container = Gtk.Box()
         grid_detail_grid_box.add(self.error_container)
@@ -588,6 +655,12 @@ class AlbumsGrid(Gtk.Overlay):
         grid_detail_grid_box.add(self.grid_bottom)
 
         scrolled_window.add(grid_detail_grid_box)
+        # GTK 3's viewport scrolls to whatever gets focus (a clicked album, a rebuilt
+        # tile), which fought the scrolling done here. Give it adjustments to move that
+        # aren't the real ones (it can't be switched off: None isn't accepted).
+        viewport = scrolled_window.get_child()
+        viewport.set_focus_vadjustment(Gtk.Adjustment())
+        viewport.set_focus_hadjustment(Gtk.Adjustment())
         self.add(scrolled_window)
 
         self.spinner = Gtk.Spinner(
@@ -607,6 +680,8 @@ class AlbumsGrid(Gtk.Overlay):
         force_grid_reload_from_master = False
         if app_config:
             self.currently_selected_id = app_config.state.selected_album_id
+            current_song = app_config.state.current_song
+            self.current_song_id = current_song.id if current_song else None
 
             if (
                 self.sort_dir != app_config.state.album_sort_direction
@@ -631,6 +706,212 @@ class AlbumsGrid(Gtk.Overlay):
 
     error_dialog = None
 
+    # Paging, or with "All" a sliding window of at most MAX_LOADED_ALBUMS albums
+    # =========================================================================
+    def _window_size(self) -> int:
+        """How many albums are shown: the page size, or with "All" the loaded ones."""
+        return self.loaded_count if self.page_size == ALL_ALBUMS else self.page_size
+
+    def _window_offset(self) -> int:
+        """Where the shown albums start in the (sorted) list of all of them."""
+        return self.window_start if self.page_size == ALL_ALBUMS else self.page_size * self.page
+
+    def _num_pages(self) -> int:
+        if self.page_size == ALL_ALBUMS:
+            return 1
+        return math.ceil(len(self.current_models) / self.page_size)
+
+    def _ordered(self, models: List["AlbumsGrid._AlbumModel"]) -> List["AlbumsGrid._AlbumModel"]:
+        return models if self.sort_dir == "ascending" else models[::-1]
+
+    def _window(self, models: List["AlbumsGrid._AlbumModel"]) -> List["AlbumsGrid._AlbumModel"]:
+        """The albums shown (in display order): this page, or the loaded ones."""
+        offset = self._window_offset()
+        return self._ordered(models)[offset : offset + self._window_size()]
+
+    def _whole_rows(self, count: int) -> int:
+        """``count`` rounded up to whole rows, so that the rows below don't reshuffle."""
+        per_row = max(1, self.items_per_row)
+        return math.ceil(count / per_row) * per_row
+
+    def _laid_out(self) -> bool:
+        # Nothing shown, or not laid out yet: the adjustment would say "empty". The
+        # layout changes the adjustment, which checks again.
+        return len(self.list_store_top) > 0 and self.grid_top.get_allocated_height() > 1
+
+    def _near_end(self) -> bool:
+        """With "All": whether there are more albums after the loaded ones and the view
+        is within a screen of the end (so that they're there before the user is)."""
+        if self.page_size != ALL_ALBUMS or not self._laid_out():
+            return False
+        if self.window_start + self.loaded_count >= len(self.current_models):
+            return False
+        adjustment = self.scrolled_window.get_vadjustment()
+        page = adjustment.get_page_size()
+        return adjustment.get_upper() - adjustment.get_value() - page < page
+
+    def _near_start(self) -> bool:
+        """With "All": whether albums before the loaded ones were dropped and the view is
+        within a screen of the start."""
+        if self.page_size != ALL_ALBUMS or self.window_start == 0 or not self._laid_out():
+            return False
+        adjustment = self.scrolled_window.get_vadjustment()
+        return adjustment.get_value() < adjustment.get_page_size()
+
+    def _on_scroll_changed(self, *args):
+        if self._height_kept and self._scroll_tick_id is None and self._hold is None:
+            self._give_back_height()
+        # Check again once GTK has finished laying out (this also runs on size changes,
+        # when the numbers can be half-way).
+        if not self._load_more_pending and (self._near_end() or self._near_start()):
+            self._load_more_pending = True
+            GLib.idle_add(self._load_more)
+
+    def _load_more(self) -> bool:
+        self._load_more_pending = False
+        if self._near_end():
+            self._load_after()
+        elif self._near_start():
+            self._load_before()
+        # If the grid still doesn't fill the view, the adjustment's "changed" signal
+        # brings us back here for the next batch.
+        return False
+
+    def _load_after(self):
+        """Shows the next batch; drops rows from the start beyond MAX_LOADED_ALBUMS."""
+        shown = self._window(self.current_models)
+        self._hold_in_place(shown[-1])
+        end = self.window_start + self.loaded_count
+        new_albums = self._ordered(self.current_models)[end : end + ALL_ALBUMS_BATCH]
+        self.loaded_count += len(new_albums)
+        # Everything after the open album's row is in the bottom grid.
+        store = (
+            self.list_store_top
+            if self.currently_selected_index is None
+            else self.list_store_bottom
+        )
+        store.splice(len(store), 0, new_albums)
+
+        if (excess := self.loaded_count - MAX_LOADED_ALBUMS) > 0:
+            drop = min(self._whole_rows(excess), self.loaded_count)
+            if self.currently_selected_index is not None and drop >= len(self.list_store_top):
+                self._close_detail_now()  # the open album is one of them
+            self.list_store_top.splice(0, drop, [])
+            self.window_start += drop
+            self.loaded_count -= drop
+
+    def _load_before(self):
+        """Shows the previous batch again; drops albums from the end beyond
+        MAX_LOADED_ALBUMS."""
+        shown = self._window(self.current_models)
+        self._hold_in_place(shown[0])
+        count = min(self._whole_rows(ALL_ALBUMS_BATCH), self.window_start)
+        new_albums = self._ordered(self.current_models)[
+            self.window_start - count : self.window_start
+        ]
+        self.list_store_top.splice(0, 0, new_albums)
+        self.window_start -= count
+        self.loaded_count += count
+
+        if (drop := self.loaded_count - MAX_LOADED_ALBUMS) > 0:
+            if self.currently_selected_index is not None and drop > len(self.list_store_bottom):
+                self._close_detail_now()  # the open album is one of them
+            store = (
+                self.list_store_top
+                if self.currently_selected_index is None
+                else self.list_store_bottom
+            )
+            store.splice(len(store) - drop, drop, [])
+            self.loaded_count -= drop
+
+    def _close_detail_now(self):
+        """Closes the open album without animating (it is far out of view) and puts all
+        of the albums back into the top grid."""
+        self._stop_scroll()
+        self._pending_reflow = None
+        self._release_hold()
+        self._height_kept = False
+        self._scroll_content.set_size_request(-1, -1)
+        transition = self.detail_box_revealer.get_transition_type()
+        self.detail_box_revealer.set_transition_type(Gtk.RevealerTransitionType.NONE)
+        self.detail_box_revealer.set_reveal_child(False)
+        self.detail_box_revealer.set_transition_type(transition)
+        below = list(self.list_store_bottom)
+        self.list_store_bottom.splice(0, len(below), [])
+        self.list_store_top.splice(len(self.list_store_top), 0, below)
+        self.currently_selected_index = None
+        self.grid_top.unselect_all()
+        self.emit("cover-clicked", None)  # so that the app forgets the selection too
+
+    # Keeping an album in the same place on the screen while things around it change
+    # =========================================================================
+    def _keep_height(self):
+        """
+        Keeps the content at least as tall as it is now while an album closes and the
+        next one opens. Otherwise, scrolled near the end, the view has to follow the
+        content down as it shrinks, and back up as the next album opens.
+        """
+        self._height_kept = True
+        self._scroll_content.set_size_request(-1, self._scroll_content.get_allocated_height())
+
+    def _content_bottom(self) -> float:
+        """Where the albums end (the kept height can make the content taller)."""
+        pos = self.grid_bottom.translate_coordinates(self._scroll_content, 0, 0)
+        width = self.grid_bottom.get_allocated_width()
+        _, natural = self.grid_bottom.get_preferred_height_for_width(width)
+        return (pos[1] if pos else 0) + natural
+
+    def _give_back_height(self):
+        """Stops keeping the height, as far as that doesn't move what's on the screen
+        (the rest goes as the user scrolls back up, see _on_scroll_changed)."""
+        if not self._height_kept:
+            return
+        adjustment = self.scrolled_window.get_vadjustment()
+        needed = adjustment.get_value() + adjustment.get_page_size()
+        if needed <= self._content_bottom() + 1:
+            self._height_kept = False
+            self._scroll_content.set_size_request(-1, -1)
+        else:
+            self._scroll_content.set_size_request(-1, int(math.ceil(needed)))
+
+    def _tile_for(self, model: "AlbumsGrid._AlbumModel") -> Optional[Gtk.Widget]:
+        for store, grid in (
+            (self.list_store_top, self.grid_top),
+            (self.list_store_bottom, self.grid_bottom),
+        ):
+            for i, m in enumerate(store):
+                if m is model:
+                    return grid.get_child_at_index(i)
+        return None
+
+    def _tile_y(self, model: "AlbumsGrid._AlbumModel") -> Optional[int]:
+        if not (tile := self._tile_for(model)):
+            return None
+        pos = tile.translate_coordinates(self._scroll_content, 0, 0)
+        return pos[1] if pos else None
+
+    def _hold_in_place(self, model: "AlbumsGrid._AlbumModel", until_released: bool = False):
+        """
+        Keeps ``model``'s tile where it is on the screen through the next layout (or,
+        with ``until_released``, through every layout until _release_hold): scrolls by
+        however much the content above it grows or shrinks.
+        """
+        if (y := self._tile_y(model)) is not None:
+            screen_y = y - self.scrolled_window.get_vadjustment().get_value()
+            self._hold = (model, screen_y, until_released)
+
+    def _release_hold(self):
+        self._hold = None
+
+    def _on_content_allocated(self, *args):
+        if not (hold := self._hold):
+            return
+        model, screen_y, until_released = hold
+        if not until_released:
+            self._hold = None
+        if (y := self._tile_y(model)) is not None:
+            self.scrolled_window.get_vadjustment().set_value(y - screen_y)
+
     def update_grid(
         self,
         order_token: int,
@@ -646,6 +927,10 @@ class AlbumsGrid(Gtk.Overlay):
             or use_ground_truth_adapter
             or self.latest_applied_order_ratchet < order_token
         )
+        if force_grid_reload_from_master:
+            # A new list (or sort, or page size): with "All", start from the first batch.
+            self.window_start = 0
+            self.loaded_count = ALL_ALBUMS_BATCH
 
         def do_update_grid(selected_index: Optional[int]):
             if self.sort_dir == "descending" and selected_index:
@@ -668,7 +953,7 @@ class AlbumsGrid(Gtk.Overlay):
             # same, so don't read and wrap all of them again.
             self.emit(
                 "num-pages-changed",
-                math.ceil(len(self.current_models) / self.page_size),
+                self._num_pages(),
             )
             do_update_grid(
                 next(
@@ -745,7 +1030,7 @@ class AlbumsGrid(Gtk.Overlay):
 
             self.emit(
                 "num-pages-changed",
-                math.ceil(len(self.current_models) / self.page_size),
+                self._num_pages(),
             )
             do_update_grid(selected_index)
 
@@ -766,7 +1051,7 @@ class AlbumsGrid(Gtk.Overlay):
                     selected_index = i
             self.emit(
                 "num-pages-changed",
-                math.ceil(len(self.current_models) / self.page_size),
+                self._num_pages(),
             )
             do_update_grid(selected_index)
 
@@ -777,7 +1062,7 @@ class AlbumsGrid(Gtk.Overlay):
         selected_index = child.get_index()
 
         if click_top:
-            page_offset = self.page_size * self.page
+            page_offset = self._window_offset()
             if self.currently_selected_index is not None and (
                 selected_index == self.currently_selected_index - page_offset
             ):
@@ -786,6 +1071,13 @@ class AlbumsGrid(Gtk.Overlay):
                 self.emit("cover-clicked", self.list_store_top[selected_index].id)
         else:
             self.emit("cover-clicked", self.list_store_bottom[selected_index].id)
+
+    def _on_album_starred(self, _: Any, starred: bool, model: "AlbumsGrid._AlbumModel"):
+        # Also on the model, so that a tile rebuilt later (moving between the grids)
+        # shows the new state too.
+        model.album.starred = datetime.datetime.now().astimezone() if starred else None
+        if model.star_icon:
+            model.star_icon.set_visible(starred)
 
     def on_grid_resize(self, flowbox: Gtk.FlowBox, rect: Gdk.Rectangle):
         # TODO (#124): this doesn't work at all consistency, especially with themes that
@@ -817,6 +1109,82 @@ class AlbumsGrid(Gtk.Overlay):
             self.reflow_grids(*pending)
         return False
 
+    # Scrolling to the opened album
+    # =========================================================================
+    SCROLL_DURATION_US = 400_000  # a bit longer than the revealer's 250ms
+
+    def _scroll_to_detail(self):
+        """Smoothly scroll so that the opened album's cover art is in the middle."""
+        self._release_hold()
+        self._stop_scroll()
+        adjustment = self.scrolled_window.get_vadjustment()
+        self._scroll_start_time = None
+        self._scroll_start_value = self._scroll_last_value = adjustment.get_value()
+        self._scroll_tick_id = self.scrolled_window.add_tick_callback(self._on_scroll_tick)
+
+    def _stop_scroll(self):
+        if self._scroll_tick_id is not None:
+            self.scrolled_window.remove_tick_callback(self._scroll_tick_id)
+            self._scroll_tick_id = None
+
+    def _detail_scroll_target(self, adjustment: Gtk.Adjustment) -> Optional[float]:
+        children = self.detail_box_inner.get_children()
+        if not children or not hasattr(children[0], "artwork"):
+            return None
+        artwork = children[0].artwork
+        # The revealer slides its child in from above, so measure from the revealer's
+        # top (which doesn't move) to where the artwork sits once it is fully open.
+        revealer_pos = self.detail_box_revealer.translate_coordinates(self._scroll_content, 0, 0)
+        artwork_pos = artwork.translate_coordinates(self.detail_box, 0, 0)
+        height = artwork.get_allocated_height()
+        if revealer_pos is None or artwork_pos is None or height <= 1:
+            return None  # not laid out yet
+        centre = revealer_pos[1] + artwork_pos[1] + height / 2
+        target = centre - adjustment.get_page_size() / 2
+        # Not into the space kept below the content while switching albums. Measured for
+        # when the details are fully open: they're still growing, and aiming for the end
+        # of the half-grown content made the scrolling go up and back down.
+        _, detail_height = self.detail_box.get_preferred_height_for_width(
+            self.detail_box.get_allocated_width()
+        )
+        still_to_grow = max(0, detail_height - self.detail_box_revealer.get_allocated_height())
+        top = self._content_bottom() + still_to_grow - adjustment.get_page_size()
+        return max(adjustment.get_lower(), min(target, top))
+
+    def _on_scroll_tick(self, widget: Gtk.Widget, frame_clock: Gdk.FrameClock) -> bool:
+        adjustment = self.scrolled_window.get_vadjustment()
+        if not self.detail_box_revealer.get_reveal_child():
+            self._scroll_tick_id = None
+            return False  # closed again
+
+        if abs(adjustment.get_value() - self._scroll_last_value) > 1:
+            # Someone else (the user) scrolled in the meantime: leave them to it.
+            self._scroll_tick_id = None
+            return False
+
+        target = self._detail_scroll_target(adjustment)
+        if target is None:
+            return True
+
+        now = frame_clock.get_frame_time()
+        if self._scroll_start_time is None:
+            self._scroll_start_time = now
+        settings = Gtk.Settings.get_default()
+        animate = settings is None or settings.props.gtk_enable_animations
+        elapsed = now - self._scroll_start_time
+        t = min(1.0, elapsed / self.SCROLL_DURATION_US) if animate else 1.0
+        eased = 1 - (1 - t) ** 3  # ease-out
+        start = self._scroll_start_value
+        adjustment.set_value(start + (target - start) * eased)
+        self._scroll_last_value = adjustment.get_value()
+
+        # The revealer is still growing until child-revealed; keep following it.
+        if t >= 1 and self.detail_box_revealer.get_child_revealed():
+            self._scroll_tick_id = None
+            self._give_back_height()
+            return False
+        return True
+
     # Helper Methods
     # =========================================================================
     def _make_label(self, text: str, name: str) -> Gtk.Label:
@@ -841,9 +1209,17 @@ class AlbumsGrid(Gtk.Overlay):
         )
         widget_box.pack_start(artwork, False, False, 0)
 
-        # Header for the widget
-        header_label = self._make_label(item.album.name, "grid-header-label")
-        widget_box.pack_start(header_label, False, False, 0)
+        # Header for the widget: the title, with a star after it if the album is starred.
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, name="grid-header")
+        header.pack_start(self._make_label(item.album.name, "grid-header-label"), False, True, 0)
+        item.star_icon = Gtk.Image.new_from_icon_name("starred-symbolic", Gtk.IconSize.MENU)
+        item.star_icon.set_name("grid-starred-icon")
+        item.star_icon.set_pixel_size(12)
+        item.star_icon.set_tooltip_text("Starred")
+        item.star_icon.set_no_show_all(True)
+        item.star_icon.set_visible(item.album.starred is not None)
+        header.pack_start(item.star_icon, False, False, 0)
+        widget_box.pack_start(header, False, False, 0)
 
         # Extra info for the widget
         info_text = util.dot_join(
@@ -877,12 +1253,24 @@ class AlbumsGrid(Gtk.Overlay):
         models: List[_AlbumModel] | None = None,
     ):
         # Calculate the page that the currently_selected_index is in. If it's a
-        # different page, then update the window.
+        # different page, then update the window. With "All", show albums up to it.
         if selected_index is not None:
-            page_of_selected_index = selected_index // self.page_size
-            if page_of_selected_index != self.page:
-                self.emit("refresh-window", {"album_page": page_of_selected_index}, False)
-                return
+            if self.page_size == ALL_ALBUMS:
+                end = self.window_start + self.loaded_count
+                if not self.window_start <= selected_index < end:
+                    # Show the albums around it instead (starting on a whole row).
+                    start = max(0, selected_index - MAX_LOADED_ALBUMS // 2)
+                    per_row = max(1, self.items_per_row)
+                    self.window_start = (start // per_row) * per_row
+                    self.loaded_count = min(
+                        MAX_LOADED_ALBUMS, len(self.current_models) - self.window_start
+                    )
+                    force_reload_from_master = True
+            else:
+                page_of_selected_index = selected_index // self.page_size
+                if page_of_selected_index != self.page:
+                    self.emit("refresh-window", {"album_page": page_of_selected_index}, False)
+                    return
 
         if (
             not force_reload_from_master
@@ -894,27 +1282,28 @@ class AlbumsGrid(Gtk.Overlay):
             # (moving the fold, opening the new album's details) runs once they are closed,
             # see _on_detail_box_child_revealed. Later calls replace the pending reflow.
             self._pending_reflow = (force_reload_from_master, selected_index, models)
+            # Keep the clicked album where it is while the open one closes above it (the
+            # albums below it would move up), until it opens and scrolls into view.
+            ordered = self._ordered(models or self.current_models)
+            if 0 <= selected_index < len(ordered):
+                self._hold_in_place(ordered[selected_index], until_released=True)
+            self._keep_height()
             self.detail_box_revealer.set_reveal_child(False)
             return
         self._pending_reflow = None
+        # Nothing is closing any more (the clicked album now stays in place by itself).
+        self._release_hold()
 
-        page_offset = self.page_size * self.page
+        page_offset = self._window_offset()
 
         # Calculate the look-at window.
         if models:
-            if self.sort_dir == "ascending":
-                window = models[page_offset : (page_offset + self.page_size)]
-            else:
-                reverse_sorted_models = reversed(models)
-                # remove to the offset
-                for _ in range(page_offset):
-                    next(reverse_sorted_models, page_offset)
-                window = list(itertools.islice(reverse_sorted_models, self.page_size))
+            window = self._window(models)
         else:
             window = list(self.list_store_top) + list(self.list_store_bottom)
 
         # Determine where the cuttoff is between the top and bottom grids.
-        entries_before_fold = self.page_size
+        entries_before_fold = self._window_size()
         if selected_index is not None and self.items_per_row:
             relative_selected_index = selected_index - page_offset
             entries_before_fold = (
@@ -938,7 +1327,7 @@ class AlbumsGrid(Gtk.Overlay):
                 len(self.list_store_bottom),
                 window[entries_before_fold:],
             )
-        elif selected_index or entries_before_fold != self.page_size:
+        elif selected_index or entries_before_fold != self._window_size():
             # This case handles when the selection changes and the entries need to be
             # re-allocated to the top and bottom grids
             # Move entries between the two stores.
@@ -973,21 +1362,22 @@ class AlbumsGrid(Gtk.Overlay):
             # This may run after the window update that would otherwise pass the app
             # config on (see _pending_reflow), so the details need the offline mode now.
             detail_element = AlbumWithSongs(
-                model.album, cover_art_size=300, offline_mode=self.offline_mode
+                model.album,
+                cover_art_size=300,
+                offline_mode=self.offline_mode,
+                current_song_id=self.current_song_id,
             )
             detail_element.connect(
                 "song-clicked",
                 lambda _, *args: self.emit("song-clicked", *args),
             )
             detail_element.connect("song-selected", lambda *a: None)
+            detail_element.connect("album-starred", self._on_album_starred, model)
 
             self.detail_box_inner.pack_start(detail_element, True, True, 0)
             self.detail_box_inner.show_all()
             self.detail_box_revealer.set_reveal_child(True)
-
-            # TODO (#88): scroll so that the grid_top is visible, and the
-            # detail_box is visible, with preference to the grid_top. May need
-            # to add another flag for this function.
+            self._scroll_to_detail()
         else:
             self.grid_top.unselect_all()
             self.grid_bottom.unselect_all()

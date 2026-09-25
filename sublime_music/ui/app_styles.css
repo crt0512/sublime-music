@@ -163,22 +163,21 @@ entry.invalid {
 #player-controls-album-artwork {
   min-height: 70px;
   min-width: 70px;
+  /* The bar leaves 6px on the left, but centres the art with ~17px above and below;
+     11px more makes the left gap match. */
+  margin-left: 11px;
   margin-right: 10px;
 }
 
+/* No padding, so gnome default themes (uneven) button padding can't turn the circle into an
+   oval. 54px + 1px border on each side = 56px; with the 24px icon that leaves a whole
+   15px on each side, so the icon sits exactly in the middle. */
 #player-controls-bar #play-button {
-  min-height: 45px;
-  min-width: 35px;
+  min-height: 54px;
+  min-width: 54px;
+  padding: 0;
   border-width: 1px;
-  border-radius: 45px;
-}
-
-/* Make the play icon look centered. */
-#player-controls-bar #play-button image {
-  margin-left: 5px;
-  margin-right: 5px;
-  margin-top: 1px;
-  margin-bottom: 1px;
+  border-radius: 50%;
 }
 
 #player-controls-bar #song-scrubber {
@@ -203,6 +202,16 @@ entry.invalid {
 #player-controls-bar #song-title {
   margin-bottom: 3px;
   font-weight: bold;
+}
+
+#player-controls-bar #song-format {
+  margin-bottom: 3px;
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
+#song-info-grid .song-info-key {
+  opacity: 0.7;
 }
 
 #player-controls-bar #album-name {
@@ -248,12 +257,13 @@ entry.invalid {
 }
 
 /* ********** Search ********** */
-#search-results {
-  min-width: 400px;
-}
-
 #search-spinner {
   margin: 15px;
+}
+
+#search-placeholder {
+  margin: 15px;
+  opacity: 0.7;
 }
 
 .search-result-row {
@@ -300,11 +310,20 @@ entry.invalid {
   margin: 20px;
 }
 
-#grid-header-label {
+#grid-header {
   margin-left: 10px;
   margin-right: 10px;
   margin-bottom: 3px;
+}
+
+#grid-header-label {
   font-weight: bold;
+}
+
+/* Not a button: only shows that the album is starred. */
+#grid-starred-icon {
+  color: #e5a50a;
+  margin-left: 4px;
 }
 
 #grid-info-label {

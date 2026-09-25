@@ -31,6 +31,7 @@ class PlayerManager:
         on_player_event: Callable[[PlayerEvent], None],
         player_device_change_callback: Callable[[PlayerDeviceEvent], None],
         config: Dict[str, Dict[str, Union[Type, Tuple[str, ...]]]],
+        chromecast_enabled: bool = True,
     ):
         self.current_song: Optional[Song] = None
         self.next_song_uri: Optional[str] = None
@@ -55,15 +56,34 @@ class PlayerManager:
         self.player_device_change_callback = callback_wrapper
 
         self.players = {
-            player_type: player_type(
-                self.on_timepos_change,
-                self._on_track_end,
-                self.on_player_event,
-                self.player_device_change_callback,
-                self.config.get(player_type.name),
-            )
+            player_type: self._create_player(player_type)
             for player_type in PlayerManager.available_player_types
+            if chromecast_enabled or player_type is not ChromecastPlayer
         }
+
+    def _create_player(self, player_type: Type) -> Any:
+        return player_type(
+            self.on_timepos_change,
+            self._on_track_end,
+            self.on_player_event,
+            self.player_device_change_callback,
+            self.config.get(player_type.name),
+        )
+
+    def set_chromecast_enabled(self, enabled: bool):
+        """
+        Starts or stops the Chromecast player (device discovery and the LAN file
+        server). Switch away from a Chromecast before disabling it.
+        """
+        if enabled and ChromecastPlayer not in self.players:
+            self.players[ChromecastPlayer] = self._create_player(ChromecastPlayer)
+        elif not enabled and (player := self.players.pop(ChromecastPlayer, None)):
+            player.shutdown()
+            self.device_id_type_map = {
+                device_id: player_type
+                for device_id, player_type in self.device_id_type_map.items()
+                if player_type is not ChromecastPlayer
+            }
 
     def change_settings(
         self,

@@ -16,6 +16,21 @@ from .common import IconButton, IconToggleButton, RatingButtonBox, SpinnerImage
 from .common.rating_button import RatingButton
 from .state import RepeatType
 
+
+def format_and_bit_rate(song: Song) -> str:
+    """
+    >>> from types import SimpleNamespace as S
+    >>> format_and_bit_rate(S(suffix="flac", bit_rate=1024))
+    'FLAC  •  1024 kbps'
+    >>> format_and_bit_rate(S(suffix=None, bit_rate=None))
+    ''
+    """
+    suffix, bit_rate = getattr(song, "suffix", None), getattr(song, "bit_rate", None)
+    return util.dot_join(
+        suffix.upper() if suffix else None, f"{bit_rate} kbps" if bit_rate else None
+    )
+
+
 SCALE_THUMB_CLICK_TOLERANCE_PX = 12
 
 
@@ -128,6 +143,17 @@ class PlayerControls(Gtk.ActionBar):
         self.star_button.set_visible(AdapterManager.can_set_song_starred())
         self.star_button.set_sensitive(has_current_song)
 
+        self.info_button.set_sensitive(has_current_song)
+        self.info_song = app_config.state.current_song
+        if not has_current_song:
+            self.info_popover.popdown()
+        elif self.info_popover.is_visible():
+            self._fill_song_info()  # the song changed, or e.g. its star
+
+        self.device_button.set_visible(app_config.chromecast_enabled)
+        if not app_config.chromecast_enabled:
+            self.device_popover.popdown()
+
         self.connecting_to_device = app_config.state.connecting_to_device
 
         def cycle_connecting(connecting_to_device_token: int):
@@ -182,6 +208,9 @@ class PlayerControls(Gtk.ActionBar):
                 self.update_starred(app_config.state.current_song.starred is not None)
 
             self.song_title.set_markup(bleach.clean(app_config.state.current_song.title))
+            song_format = format_and_bit_rate(app_config.state.current_song)
+            self.song_format.set_text(song_format)
+            self.song_format.set_visible(bool(song_format))
             # TODO (#71): use walrus once MYPY gets its act together
             album = app_config.state.current_song.album
             artist = app_config.state.current_song.artist
@@ -202,6 +231,8 @@ class PlayerControls(Gtk.ActionBar):
             self.album_art.set_from_file(None)
             self.album_art.set_loading(False)
             self.song_title.set_markup("")
+            self.song_format.set_text("")
+            self.song_format.hide()
             self.album_name.set_markup("")
             self.artist_name.set_markup("")
 
@@ -526,6 +557,72 @@ class PlayerControls(Gtk.ActionBar):
 
         self.device_list.show_all()
 
+    info_song: Optional[Song] = None
+
+    def on_info_click(self, _: Any):
+        if self.info_popover.is_visible():
+            self.info_popover.popdown()
+        else:
+            self._fill_song_info()
+            self.info_popover.popup()
+            self.info_popover.show_all()
+
+    def _fill_song_info(self):
+        for c in self.info_grid.get_children():
+            self.info_grid.remove(c)
+        if not (song := self.info_song):
+            return
+
+        def name(obj: Any) -> Optional[str]:
+            return getattr(obj, "name", None) if obj else None
+
+        genre = getattr(song, "genres", None) or name(song.genre)
+        rows = [
+            ("Title", song.title),
+            ("Artist", name(song.artist)),
+            ("Album", name(song.album)),
+            ("Album Artist", getattr(song, "album_artist", None)),
+            ("Genre", genre),
+            ("Year", song.year),
+            ("Track", song.track),
+            ("Disc", song.disc_number),
+            ("Duration", util.format_song_duration(song.duration) if song.duration else None),
+            ("Format", (getattr(song, "suffix", None) or "").upper() or None),
+            ("Bit Rate", f"{song.bit_rate} kbps" if getattr(song, "bit_rate", None) else None),
+            ("File Size", util.format_size(song.size) or None),
+            ("Rating", util.format_rating(song.user_rating) or None),
+            ("Starred", util.format_datetime(song.starred) or None),
+            ("Play Count", getattr(song, "play_count", None)),
+            ("Last Played", util.format_datetime(getattr(song, "played", None)) or None),
+            ("Added", util.format_datetime(getattr(song, "created", None)) or None),
+            ("Path", song.path),
+            ("ID", song.id),
+        ]
+        top = 0
+        for label, value in rows:
+            if value is None or value == "":
+                continue
+            key = Gtk.Label(label=label, halign=Gtk.Align.END, valign=Gtk.Align.START)
+            key.get_style_context().add_class("song-info-key")
+            # Selectable, so that the path or ID can be copied. Long values wrap at 45
+            # characters; width_chars keeps GTK from sizing the popover as if every value
+            # were squeezed to its narrowest (which makes it huge).
+            text = str(value)
+            value_label = Gtk.Label(
+                label=text,
+                halign=Gtk.Align.START,
+                xalign=0,
+                selectable=True,
+                wrap=True,
+                wrap_mode=Pango.WrapMode.WORD_CHAR,
+                width_chars=min(len(text), 45),
+                max_width_chars=45,
+            )
+            self.info_grid.attach(key, 0, top, 1, 1)
+            self.info_grid.attach(value_label, 1, top, 1, 1)
+            top += 1
+        self.info_grid.show_all()
+
     def on_device_click(self, _: Any):
         if self.device_popover.is_visible():
             self.device_popover.popdown()
@@ -603,9 +700,6 @@ class PlayerControls(Gtk.ActionBar):
     def create_song_display(self) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
 
-        box.pack_start(self.star_button, False, False, 0)
-        self.star_button.hide()
-
         self.album_art = SpinnerImage(
             image_name="player-controls-album-artwork",
             image_size=70,
@@ -627,6 +721,10 @@ class PlayerControls(Gtk.ActionBar):
         self.song_title = make_label("song-title")
         details_box.add(self.song_title)
 
+        # Format and bit rate, e.g. "FLAC  •  1024 kbps".
+        self.song_format = make_label("song-format")
+        details_box.add(self.song_format)
+
         self.album_name = make_label("album-name")
         details_box.add(self.album_name)
 
@@ -635,6 +733,9 @@ class PlayerControls(Gtk.ActionBar):
 
         details_box.pack_start(Gtk.Box(), True, True, 0)
         box.pack_start(details_box, False, False, 5)
+
+        box.pack_start(self.star_button, False, False, 0)
+        self.star_button.hide()
 
         return box
 
@@ -708,6 +809,7 @@ class PlayerControls(Gtk.ActionBar):
             icon_size=Gtk.IconSize.LARGE_TOOLBAR,
         )
         self.play_button.set_name("play-button")
+        self.play_button.get_child().set_halign(Gtk.Align.CENTER)
         self.play_button.set_action_name("app.play-pause")
         buttons.pack_start(self.play_button, False, False, 0)
 
@@ -748,7 +850,7 @@ class PlayerControls(Gtk.ActionBar):
             "star-empty",
             "Star current song",
             valign=Gtk.Align.CENTER,
-            margin_right=8,
+            margin_left=3,
         )
         self.star_button.connect("clicked", self.on_star_clicked)
 
@@ -757,12 +859,36 @@ class PlayerControls(Gtk.ActionBar):
         vbox.pack_start(Gtk.Box(), True, True, 0)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
 
-        # Device button (for chromecast)
+        # Song info button
+        self.info_button = IconButton(
+            "help-about-symbolic",
+            "Show information about the current song",
+            icon_size=Gtk.IconSize.LARGE_TOOLBAR,
+        )
+        self.info_button.connect("clicked", self.on_info_click)
+        box.pack_start(self.info_button, False, True, 5)
+
+        self.info_popover = Gtk.PopoverMenu(modal=False, name="song-info-popover")
+        self.info_popover.set_relative_to(self.info_button)
+        info_popover_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        info_popover_box.add(
+            Gtk.Label(label="<b>Song Info</b>", use_markup=True, halign=Gtk.Align.START, margin=10)
+        )
+        self.info_grid = Gtk.Grid(
+            name="song-info-grid", column_spacing=15, row_spacing=6, margin=10, margin_top=0
+        )
+        info_popover_box.add(self.info_grid)
+        self.info_popover.add(info_popover_box)
+
+        # Device button (for chromecast). Hidden while Chromecast support is disabled;
+        # no_show_all so that show_all() doesn't bring it back.
         self.device_button = IconButton(
             "chromecast-symbolic",
             "Show available audio output devices",
             icon_size=Gtk.IconSize.LARGE_TOOLBAR,
+            no_show_all=True,
         )
+        self.device_button.get_child().show_all()
         self.device_button.connect("clicked", self.on_device_click)
         box.pack_start(self.device_button, False, True, 5)
 
@@ -880,8 +1006,24 @@ class PlayerControls(Gtk.ActionBar):
                     str(resolve_path("ui/images/play-queue-play.png"))
                 )
 
+                # The cover keeps its aspect ratio, so it can be smaller than 50x50 in
+                # one direction: fit the overlay into it, centred, or GdkPixbuf refuses
+                # to draw past the cover's edge.
+                width, height = pixbuf.get_width(), pixbuf.get_height()
+                ow, oh = play_overlay_pixbuf.get_width(), play_overlay_pixbuf.get_height()
+                scale = min(width / ow, height / oh)
                 play_overlay_pixbuf.composite(
-                    pixbuf, 0, 0, 50, 50, 0, 0, 1, 1, GdkPixbuf.InterpType.NEAREST, 200
+                    pixbuf,
+                    0,
+                    0,
+                    width,
+                    height,
+                    (width - ow * scale) / 2,
+                    (height - oh * scale) / 2,
+                    scale,
+                    scale,
+                    GdkPixbuf.InterpType.BILINEAR,
+                    200,
                 )
 
             cell.set_property("pixbuf", pixbuf)

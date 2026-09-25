@@ -1,5 +1,5 @@
 import functools
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 
 from gi.repository import Gdk, GLib, GObject, Gtk
@@ -80,6 +80,28 @@ def format_sequence_duration(duration: Optional[timedelta]) -> str:
         format_components.append(secs)
 
     return ", ".join(format_components)
+
+
+def format_datetime(value: Optional[datetime]) -> str:
+    if value is None:
+        return ""
+    if value.tzinfo is not None:
+        value = value.astimezone()
+    return value.strftime("%Y-%m-%d %H:%M")
+
+
+def format_size(size: Optional[int]) -> str:
+    if not size:
+        return ""
+    if size < 1024 * 1024:
+        return "{} KiB".format(round(size / 1024))
+    return "{:.1f} MiB".format(size / 1024 / 1024)
+
+
+def format_rating(rating: Optional[int]) -> str:
+    if not rating:
+        return ""
+    return "★" * rating + "☆" * (5 - rating)
 
 
 def dot_join(*items: Any) -> str:

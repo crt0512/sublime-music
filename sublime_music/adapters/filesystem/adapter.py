@@ -1317,6 +1317,11 @@ class FilesystemAdapter(CachingAdapter):
             song.starred = datetime.now().astimezone() if data else None
             song.save()
 
+        elif data_key == KEYS.ALBUM_STARRED:
+            if album := models.Album.get_or_none(models.Album.id == param):
+                album.starred = datetime.now().astimezone() if data else None
+                album.save()
+
         elif data_key == KEYS.SONG_PLAYED:
             if song := models.Song.get_or_none(models.Song.id == param):
                 song.play_count = (song.play_count or 0) + 1

@@ -586,6 +586,13 @@ class Adapter(abc.ABC):
         """
         return False
 
+    @property
+    def can_set_album_starred(self) -> bool:
+        """
+        Whether or not the adapter supports :class:`set_album_starred`.
+        """
+        return False
+
     # Artists
     @property
     def supported_artist_query_types(self) -> Set[AlbumSearchQuery.Type]:
@@ -812,6 +819,15 @@ class Adapter(abc.ABC):
         """
         raise self._check_can_error("set_song_starred")
 
+    def set_album_starred(self, album_id: str, starred: bool):
+        """
+        Star (favourite) or unstar the given album (the album itself, not its songs).
+
+        :param album_id: A string which uniquely identifies the album
+        :param starred: whether the album should be starred afterwards
+        """
+        raise self._check_can_error("set_album_starred")
+
     def get_artists(self) -> Sequence[Artist]:
         """
         Get a list of all of the artists known to the adapter.
@@ -1007,6 +1023,7 @@ class CachingAdapter(Adapter):
         SONG_FILE_PERMANENT = "song_file_permanent"
         SONG_RATING = "song_rating"
         SONG_STARRED = "song_starred"
+        ALBUM_STARRED = "album_starred"
         SONG_PLAYED = "song_played"  # the song was played once more
 
         # These are only for clearing the cache, and will only do deletion

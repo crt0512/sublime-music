@@ -129,28 +129,6 @@ def play_from_range(index: int, count: int, total: int) -> range:
     return range(index, min(index + max(1, min(count, MAX_QUEUE_LENGTH)), total))
 
 
-def _format_datetime(value: Optional[datetime]) -> str:
-    if value is None:
-        return ""
-    if value.tzinfo is not None:
-        value = value.astimezone()
-    return value.strftime("%Y-%m-%d %H:%M")
-
-
-def _format_size(size: Optional[int]) -> str:
-    if not size:
-        return ""
-    if size < 1024 * 1024:
-        return "{} KiB".format(round(size / 1024))
-    return "{:.1f} MiB".format(size / 1024 / 1024)
-
-
-def _format_rating(rating: Optional[int]) -> str:
-    if not rating:
-        return ""
-    return "★" * rating + "☆" * (5 - rating)
-
-
 def song_row(song: LibrarySong, offline_mode: bool) -> List[Any]:
     """The list store row for a song."""
     values: Dict[str, Any] = {
@@ -159,10 +137,10 @@ def song_row(song: LibrarySong, offline_mode: bool) -> List[Any]:
         "starred": "starred-symbolic" if song.starred else "non-starred-symbolic",
         "title": song.title,
         "duration": "" if song.duration is None else util.format_song_duration(song.duration),
-        "user_rating": _format_rating(song.user_rating),
+        "user_rating": util.format_rating(song.user_rating),
         "album": song.album or "",
         "artist": song.artist or "",
-        "created": _format_datetime(song.created),
+        "created": util.format_datetime(song.created),
         "cache_status": CACHE_STATUS_ICONS.get(song.cache_status, ""),
         "album_artist": song.album_artist or "",
         "genre": song.genre or "",
@@ -171,8 +149,8 @@ def song_row(song: LibrarySong, offline_mode: bool) -> List[Any]:
         "year": str(song.year) if song.year else "",
         "bit_rate": f"{song.bit_rate} kbps" if song.bit_rate else "",
         "suffix": song.suffix or "",
-        "size": _format_size(song.size),
-        "played": _format_datetime(song.played),
+        "size": util.format_size(song.size),
+        "played": util.format_datetime(song.played),
     }
     playable = not offline_mode or song.cache_status in PLAYABLE_OFFLINE
     return [playable, song.id, NORMAL_WEIGHT, False, *(values[c.name] for c in COLUMNS)]
@@ -465,7 +443,7 @@ class SongsPanel(Gtk.Box):
 
     def _update_last_synced_label(self, last_synced: Optional[datetime]):
         self.last_synced_label.set_text(
-            f"Last synced {_format_datetime(last_synced)}" if last_synced else "Never synced"
+            f"Last synced {util.format_datetime(last_synced)}" if last_synced else "Never synced"
         )
 
     def _reload(self, last_synced: Optional[datetime]):
@@ -817,7 +795,7 @@ class SongsPanel(Gtk.Box):
         column = STORE_INDEX["user_rating"]
         current = self.store[index][column]
         new_rating: Optional[int] = None if rating == current.count("★") else rating
-        self.store[index][column] = _format_rating(new_rating)  # optimistic
+        self.store[index][column] = util.format_rating(new_rating)  # optimistic
 
         song = Song()
         song.id = song_id
