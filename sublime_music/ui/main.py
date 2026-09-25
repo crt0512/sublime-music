@@ -1142,7 +1142,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.emit("refresh-window", {"__settings__": changed_settings}, False)
 
     SEARCH_ENTRY_WIDTH = 300  # while it has focus
-    SEARCH_POPOVER_EXTRA_WIDTH = -5  # how much wider the results are than the entry
+    SEARCH_POPOVER_EXTRA_WIDTH = 50  # how much wider the results are than the entry
 
     def _show_search(self):
         self.search_entry.set_size_request(self.SEARCH_ENTRY_WIDTH, -1)

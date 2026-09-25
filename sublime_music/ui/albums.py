@@ -597,7 +597,7 @@ class AlbumsGrid(Gtk.Overlay):
         self.window_start = 0
         self.loaded_count = ALL_ALBUMS_BATCH
         self._load_more_pending = False
-        self._hold: Optional[Tuple["AlbumsGrid._AlbumModel", float, bool]] = None
+        self._hold: Optional[Tuple["AlbumsGrid._AlbumModel", int, bool]] = None
         # While switching albums the content keeps its height (see _keep_height).
         self._height_kept = False
         grid_detail_grid_box.connect("size-allocate", self._on_content_allocated)
@@ -735,9 +735,16 @@ class AlbumsGrid(Gtk.Overlay):
         return math.ceil(count / per_row) * per_row
 
     def _laid_out(self) -> bool:
-        # Nothing shown, or not laid out yet: the adjustment would say "empty". The
+        # Nothing shown, not laid out yet (the adjustment would say "empty"), or the last
+        # batch not laid out yet (its tiles have no position for _hold_in_place). The
         # layout changes the adjustment, which checks again.
-        return len(self.list_store_top) > 0 and self.grid_top.get_allocated_height() > 1
+        if self._hold is not None or len(self.list_store_top) == 0:
+            return False
+        shown = list(self.list_store_top) + list(self.list_store_bottom)
+        return all(
+            (tile := self._tile_for(model)) is not None and tile.get_allocated_height() > 1
+            for model in (shown[0], shown[-1])
+        )
 
     def _near_end(self) -> bool:
         """With "All": whether there are more albums after the loaded ones and the view
@@ -780,7 +787,10 @@ class AlbumsGrid(Gtk.Overlay):
     def _load_after(self):
         """Shows the next batch; drops rows from the start beyond MAX_LOADED_ALBUMS."""
         shown = self._window(self.current_models)
-        self._hold_in_place(shown[-1])
+        if self.loaded_count + ALL_ALBUMS_BATCH > MAX_LOADED_ALBUMS:
+            # Albums will be dropped from the start (adding them at the end doesn't move
+            # anything on the screen).
+            self._hold_in_place(shown[-1])
         end = self.window_start + self.loaded_count
         new_albums = self._ordered(self.current_models)[end : end + ALL_ALBUMS_BATCH]
         self.loaded_count += len(new_albums)
@@ -897,8 +907,7 @@ class AlbumsGrid(Gtk.Overlay):
         however much the content above it grows or shrinks.
         """
         if (y := self._tile_y(model)) is not None:
-            screen_y = y - self.scrolled_window.get_vadjustment().get_value()
-            self._hold = (model, screen_y, until_released)
+            self._hold = (model, y, until_released)
 
     def _release_hold(self):
         self._hold = None
@@ -906,11 +915,15 @@ class AlbumsGrid(Gtk.Overlay):
     def _on_content_allocated(self, *args):
         if not (hold := self._hold):
             return
-        model, screen_y, until_released = hold
-        if not until_released:
-            self._hold = None
-        if (y := self._tile_y(model)) is not None:
-            self.scrolled_window.get_vadjustment().set_value(y - screen_y)
+        model, old_y, until_released = hold
+        if (y := self._tile_y(model)) is None:
+            return
+        # Scroll by as much as the tile moved (rather than to where it was on the
+        # screen): the user may have scrolled since, which must not be undone.
+        if y != old_y:
+            adjustment = self.scrolled_window.get_vadjustment()
+            adjustment.set_value(adjustment.get_value() + y - old_y)
+        self._hold = (model, y, True) if until_released else None
 
     def update_grid(
         self,
@@ -1231,7 +1244,9 @@ class AlbumsGrid(Gtk.Overlay):
 
         # Download the cover art.
         def on_artwork_downloaded(filename: Result[str]):
-            artwork.set_from_file(filename.result())
+            # Decoded off the main thread: tiles are made in batches of 50 (with "All",
+            # while scrolling), and decoding them all here made the scrolling stutter.
+            artwork.set_from_file_async(filename.result())
             artwork.set_loading(False)
 
         cover_art_filename_future = AdapterManager.get_cover_art_uri(item.album.cover_art, "file")
