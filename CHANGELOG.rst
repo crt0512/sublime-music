@@ -1,3 +1,108 @@
+v0.14.0
+=======
+
+**Dependency Changes:** On macOS, ``pyobjc-framework-MediaPlayer`` is used for the Now
+Playing integration and the appearance check (bundled into the app, and installed into
+``.venv`` by ``make venv``). It is optional everywhere else.
+
+**Packaging Changes:**
+
+* ``BUNDLE=2`` builds a fully self-contained package with PyInstaller: Python, GTK,
+  PyGObject, libmpv (with ffmpeg) and the Python dependencies are all inside, only glibc,
+  X11 and OpenGL come from the system. ``make freeze`` builds just the frozen app.
+* ``make pkg`` builds a self-contained ``Sublime Music.app`` by default (``BUNDLE=0`` for
+  a thin app using the Mac's own Python and GTK). The installer always installs into
+  ``/Applications``.
+* MacPorts is supported next to Homebrew for building on macOS. ``MACOS_PKGMGR=brew`` or
+  ``MACOS_PKGMGR=macports`` picks one when both are installed (Homebrew by default);
+  ``MACOS_PREFIX`` still overrides the prefix directly.
+* The bundled Python dependencies are pinned in ``packaging/vendor-requirements.txt``;
+  ``make vendor-lock`` refreshes them.
+* ``make venv`` installs the app's dependencies into ``.venv`` itself (only PyGObject comes
+  from the system), so removing distribution packages can't break ``make run`` or
+  ``make test``.
+* Build instructions moved from the README to ``BUILD.md``.
+
+**Features**
+
+* Albums tab:
+
+  * Opening an album smoothly scrolls its cover art into the middle of the view.
+  * Up to 100 albums per page, or "All", which shows 50 albums and loads more as you
+    scroll (at most 200 at a time, so that big libraries stay somewhat responsive).
+  * Starred albums show a small star next to their title.
+  * Open albums have a star button for the album and a star column for each song.
+  * Only the song that is playing is shown in bold in an open album's song list.
+  * "Go to album" (from search and elsewhere) keeps the current sort unless their filtered
+   (random, most played, starred, by year...) in which case it then switches to a
+    sort that shows every album, chosen in Settings > Albums (recently added by default).
+  * The default sort is now "recently added".
+
+* Player bar:
+
+  * A star button for the song that is playing.
+  * The song's format and bit rate are shown under its title.
+  * An info button shows all of the song's metadata (path, size, play count, dates...),
+    and the values can be copied.
+  * Clicking the progress bar or the volume slider actually jumps to where you clicked
+    even on setups with weird window managers and goofy scaling solutions.
+  
+
+* Media keys:
+
+  * On GNOME, Cinnamon and MATE the keyboard's media keys go to Sublime Music (grabbed
+    through the settings daemon, again whenever its window gets focus) instead of to
+    whichever app registered with MPRIS first.
+  * On macOS, Sublime Music appears in Control Center / Now Playing and follows the
+    media keys.
+
+* Songs tab: the song that is playing is shown in bold, and rows are striped.
+* "Play from here" queues a configurable number of songs (Settings > Play Queue) and
+  shows how many.
+* Chromecast support can be switched off completely in Settings > Devices (no device
+  discovery, no LAN server, no device button).
+* The "resume the play queue?" prompt hides itself after 5 seconds (configurable in
+  Settings > Play Queue, 0 = never).
+* The search popover is only as tall as its results, shows a hint before searching and
+  "No results" for an empty search, and is as wide as the search bar + relative 50px.
+* The settings popover scrolls when the window is too small to show all settings.
+* macOS: the app follows the system's light/dark appearance (and that without stalling MPV).
+* The window has the app's icon, and the taskbar matches it to its launcher (``StartupWMClass``)
+* libmpv's warnings and errors (audio underruns, decode errors...) now show in the app log.
+
+**Bug Fixes**
+
+* Space, Home and End work in every text field (the Songs tab's search box, for one)
+  instead of controlling playback.
+* Fixed most large albums sometimes showing their songs out of order until one was clicked
+  (multi-disc albums are now always sorted by disc and track).
+    * Still happens occasionally for some random albums with weird metadata.
+* The play/pause button is now actually round ... with its icon centred.
+* Fixed ``gdk_pixbuf_composite`` warnings, and the play queue not marking the playing
+  song, for songs with non-square cover art.
+* The apps connection status is right from the start instead of showing offline until the
+  first background ping.
+* macOS: fixed the Chromecast LAN server and the background server ping, and the time
+  labels no longer jitter as the seconds change.
+* Chromecast: works with pychromecast 9 to 14 (listener registration and mute state),
+  stops device discovery on quit, and logs launch and load errors.
+* Fixed an error building the settings menu for number player settings (such as the
+  Chromecast LAN port).
+* Repeated searches for the same text are not run again; clearing the search clears the
+  results.
+
+**Performance**
+
+* Cover art in the Albums tab and spinner animations are processed off the main thread,
+  so scrolling doesn't stutter while albums are added.
+
+**Notes**
+* Note on Chromecast fixes : I (crt0512) personally dont have any Chromecast devices at home,
+  testing was done at my workplace where we do have them, forgot to take screenshots/pictures,
+  might make them someday.
+* There might be a bunch of stuff I forgot because my "Versioning" and "Commit Messages"
+  are total trash tbh.
+
 v0.13.0
 =======
 
