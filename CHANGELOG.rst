@@ -34,7 +34,7 @@ Playing integration and the appearance check (bundled into the app, and installe
   * Open albums have a star button for the album and a star column for each song.
   * Only the song that is playing is shown in bold in an open album's song list.
   * "Go to album" (from search and elsewhere) keeps the current sort unless their filtered
-   (random, most played, starred, by year...) in which case it then switches to a
+    (random, most played, starred, by year...) in which case it then switches to a
     sort that shows every album, chosen in Settings > Albums (recently added by default).
   * The default sort is now "recently added".
 
