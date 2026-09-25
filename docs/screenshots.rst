@@ -1,11 +1,7 @@
 Screenshots
 ===========
 
-Sunmer's screenshots were taken using the `Arc Dark theme`_.
-crt0512's screenshots were taken using the `Mint X Dark theme`_.
-
-.. _Arc Dark theme: https://github.com/horst3180/Arc-theme
-.. _Mint X Dark theme: https://github.com/linuxmint/cinnamon-spices-themes/tree/master/Mint-X-Dark
+crt0512's screenshots were taken using Adwaita Dark theme.
 
 Album Cover Tab
 ---------------
@@ -43,6 +39,12 @@ Play Queue
 
 .. image:: ./_static/screenshots/play-queue.png
    :target: ./_static/screenshots/play-queue.png
+
+Song Details
+----------
+
+.. image:: ./_static/screenshots/song-details.png
+   :target: ./_static/screenshots/song-details.png
 
 Play on Chromecasts on the LAN
 ------------------------------

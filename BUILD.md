@@ -4,7 +4,7 @@ Sublime Music (Plus) is built and installed with the `Makefile` in the repositor
 
 ## Linux
 
-You need `python3` (3.10 or newer), `pip`, GNU make and at runtime GTK3 with PyGObject and libmpv for building nomatter what Linux you're on.
+You need `python3` (technically 3.10 or newer, 3.13/3.14 recommended), `pip`, GNU make and at runtime GTK3 with PyGObject and libmpv for building nomatter what Linux you're on.
 
 
 ### Installation via deb Package
