@@ -135,3 +135,4 @@ DEPS.md
 SONGS.md
 .DS_Store
 Thumbs.db
+uv.lock

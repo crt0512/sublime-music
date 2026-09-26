@@ -1085,7 +1085,10 @@ class SublimeMusicApp(Gtk.Application):
                 self.window.player_controls.update_rating(rating)
 
         current_song.user_rating = rating
-        AdapterManager.set_song_rating(current_song, rating).add_done_callback(on_done)
+        # The future completes on an executor thread, and on_done touches GTK widgets.
+        AdapterManager.set_song_rating(current_song, rating).add_done_callback(
+            lambda f: GLib.idle_add(on_done, f)
+        )
 
     def on_current_song_starred(self, _, starred: bool):
         if not self.window:

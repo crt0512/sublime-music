@@ -839,7 +839,8 @@ class AlbumsGrid(Gtk.Overlay):
         of the albums back into the top grid."""
         self._stop_scroll()
         self._pending_reflow = None
-        self._release_hold()
+        # _load_after/_load_before call this with their own hold set: keep it.
+        self._release_hold(keep_one_shot=True)
         self._height_kept = False
         self._scroll_content.set_size_request(-1, -1)
         transition = self.detail_box_revealer.get_transition_type()
@@ -909,7 +910,14 @@ class AlbumsGrid(Gtk.Overlay):
         if (y := self._tile_y(model)) is not None:
             self._hold = (model, y, until_released)
 
-    def _release_hold(self):
+    def _release_hold(self, keep_one_shot: bool = False):
+        """
+        Stops holding an album in place. With ``keep_one_shot``, a hold for just the next
+        layout (albums added or dropped by scrolling) stays: without it, the albums
+        dropped above the view would make it jump ahead by as many.
+        """
+        if keep_one_shot and self._hold is not None and not self._hold[2]:
+            return
         self._hold = None
 
     def _on_content_allocated(self, *args):
@@ -1307,7 +1315,8 @@ class AlbumsGrid(Gtk.Overlay):
             return
         self._pending_reflow = None
         # Nothing is closing any more (the clicked album now stays in place by itself).
-        self._release_hold()
+        # A reload replaces every tile, so a hold on one of them is gone too.
+        self._release_hold(keep_one_shot=not force_reload_from_master)
 
         page_offset = self._window_offset()
 

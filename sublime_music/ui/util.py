@@ -211,7 +211,7 @@ def show_song_popover(
         update_playlist_result = AdapterManager.update_playlist(
             playlist_id=playlist.id, append_song_ids=song_ids
         )
-        update_playlist_result.add_done_callback(lambda _: on_playlist_state_change())
+        update_playlist_result.add_done_callback(lambda _: GLib.idle_add(on_playlist_state_change))
 
     popover = Gtk.PopoverMenu()
     vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -345,7 +345,7 @@ def show_song_popover(
                 playlists_vbox.pack_start(button, False, True, 0)
 
         playlists_result = AdapterManager.get_playlists()
-        playlists_result.add_done_callback(on_get_playlists_done)
+        playlists_result.add_done_callback(lambda f: GLib.idle_add(on_get_playlists_done, f))
 
     popover.add(playlists_vbox)
     popover.child_set_property(playlists_vbox, "submenu", "add-to-playlist")
