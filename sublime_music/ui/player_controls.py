@@ -976,7 +976,6 @@ class PlayerControls(Gtk.ActionBar):
         )
         self.play_queue_list = Gtk.TreeView(
             model=self.play_queue_store,
-            reorderable=True,
             headers_visible=False,
         )
         selection = self.play_queue_list.get_selection()
@@ -1039,6 +1038,7 @@ class PlayerControls(Gtk.ActionBar):
         column = Gtk.TreeViewColumn("", renderer, markup=2, sensitive=0)
         self.play_queue_list.append_column(column)
 
+        util.make_reorderable(self.play_queue_list)
         self.play_queue_list.connect("row-activated", self.on_song_activated)
         self.play_queue_list.connect("button-press-event", self.on_play_queue_button_press)
 

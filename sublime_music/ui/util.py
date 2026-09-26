@@ -33,6 +33,109 @@ def format_song_duration(duration_secs: Union[int, timedelta, None]) -> str:
     return f"{duration_secs // 60}:{duration_secs % 60:02}"
 
 
+def move_row(store: Gtk.ListStore, source: int, dest: int):
+    """
+    Moves row ``source`` of ``store`` to before row ``dest`` (``len(store)`` for the end),
+    by inserting a copy and then deleting the original: the same row-inserted and
+    row-deleted signals as GTK's own drag-and-drop reordering sends.
+
+    >>> store = Gtk.ListStore(str)
+    >>> for s in "abcd":
+    ...     _ = store.append([s])
+    >>> move_row(store, 0, 3)
+    >>> "".join(r[0] for r in store)
+    'bcad'
+    >>> move_row(store, 3, 0)
+    >>> "".join(r[0] for r in store)
+    'dbca'
+    >>> move_row(store, 1, 2)  # already there
+    >>> "".join(r[0] for r in store)
+    'dbca'
+    """
+    if dest in (source, source + 1):
+        return
+    store.insert(dest, list(store[source]))
+    store.remove(store.get_iter(source + 1 if dest < source else source))
+
+
+# Not GTK's own "GTK_TREE_MODEL_ROW": on macOS 11+, GDK passes drag targets through
+# UTType's MIME type lookup, and a target that isn't a MIME type comes back as a NULL
+# atom, so GTK never sees its own target on the drop and refuses it. See
+# make_reorderable.
+_ROW_TARGET = "application/x-sublime-music-row"
+
+
+def make_reorderable(tree_view: Gtk.TreeView):
+    """
+    Lets the rows of ``tree_view`` (with a Gtk.ListStore) be reordered by dragging them,
+    like ``reorderable=True`` does, but in a way that works on macOS too. Call it before
+    connecting any ``button-press-event`` handler that can stop the event, so that the
+    drag knows which row was pressed.
+    """
+    # The row being dragged. The drop doesn't get it through the drag's data: on macOS,
+    # GTK hands the drop empty data for a target of its own like this one.
+    dragged: List[Optional[int]] = [None]
+    pressed: List[Optional[int]] = [None]
+
+    def on_button_press(tv: Gtk.TreeView, event: Gdk.EventButton) -> bool:
+        pressed[0] = None
+        if event.button == 1 and event.window == tv.get_bin_window():
+            if path_info := tv.get_path_at_pos(int(event.x), int(event.y)):
+                pressed[0] = path_info[0].get_indices()[0]
+        return False
+
+    def on_drag_begin(tv: Gtk.TreeView, context: Gdk.DragContext):
+        dragged[0] = pressed[0]
+        if dragged[0] is not None:
+            icon = tv.create_row_drag_icon(Gtk.TreePath.new_from_indices([dragged[0]]))
+            Gtk.drag_set_icon_surface(context, icon)
+
+    def on_drag_end(tv: Gtk.TreeView, context: Gdk.DragContext):
+        dragged[0] = None
+        tv.set_drag_dest_row(None, Gtk.TreeViewDropPosition.BEFORE)
+
+    def dest_row(tv: Gtk.TreeView, x: int, y: int) -> Tuple[Optional[Gtk.TreePath], Any]:
+        if dest := tv.get_dest_row_at_pos(x, y):
+            path, pos = dest
+            # Between rows only: dropping onto a row means before or after it.
+            after = pos in (Gtk.TreeViewDropPosition.AFTER, Gtk.TreeViewDropPosition.INTO_OR_AFTER)
+            return path, (
+                Gtk.TreeViewDropPosition.AFTER if after else Gtk.TreeViewDropPosition.BEFORE
+            )
+        # Below the last row: to the end.
+        if n := len(tv.get_model()):
+            return Gtk.TreePath.new_from_indices([n - 1]), Gtk.TreeViewDropPosition.AFTER
+        return None, None
+
+    def on_drag_motion(tv: Gtk.TreeView, context: Any, x: int, y: int, time: int) -> bool:
+        path, pos = dest_row(tv, x, y)
+        tv.set_drag_dest_row(path, pos)
+        # The tree view's own handler would unset the row just set (it isn't a model
+        # drag destination).
+        tv.stop_emission_by_name("drag-motion")
+        return True
+
+    def on_drag_drop(tv: Gtk.TreeView, context: Gdk.DragContext, x: int, y: int, time: int):
+        tv.set_drag_dest_row(None, Gtk.TreeViewDropPosition.BEFORE)
+        path, pos = dest_row(tv, x, y)
+        source = dragged[0]
+        if source is not None and path is not None:
+            dest = path.get_indices()[0] + (pos == Gtk.TreeViewDropPosition.AFTER)
+            move_row(tv.get_model(), source, dest)
+        Gtk.drag_finish(context, source is not None, False, time)
+        tv.stop_emission_by_name("drag-drop")
+        return True
+
+    targets = [Gtk.TargetEntry.new(_ROW_TARGET, Gtk.TargetFlags.SAME_WIDGET, 0)]
+    tree_view.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, targets, Gdk.DragAction.MOVE)
+    tree_view.drag_dest_set(Gtk.DestDefaults.MOTION, targets, Gdk.DragAction.MOVE)
+    tree_view.connect("button-press-event", on_button_press)
+    tree_view.connect("drag-begin", on_drag_begin)
+    tree_view.connect("drag-end", on_drag_end)
+    tree_view.connect("drag-motion", on_drag_motion)
+    tree_view.connect("drag-drop", on_drag_drop)
+
+
 def pluralize(string: str, number: int, pluralized_form: str | None = None) -> str:
     """
     Pluralize the given string given the count as a number.

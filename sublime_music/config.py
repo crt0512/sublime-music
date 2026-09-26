@@ -117,6 +117,20 @@ def decode_providers(
     }
 
 
+def _write_atomically(path: Path, data: bytes):
+    """
+    Replaces the file at ``path`` with ``data`` all at once: the app being killed or
+    crashing while saving leaves the old file, not half of the new one (a config that
+    doesn't load is replaced by the defaults, which forgets every music source).
+    """
+    temporary = path.with_name(path.name + ".tmp")
+    with open(temporary, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temporary, path)
+
+
 # The most "Play from here" may queue, whatever the setting says.
 MAX_PLAY_FROM_HERE_COUNT = 1024
 
@@ -168,6 +182,12 @@ class AppConfiguration(DataClassJsonMixin):
 
     # Hide the "resume the play queue?" prompt after this many seconds (0 = never).
     resume_prompt_timeout_seconds: int = 5
+
+    # The main window's size (its last one when not maximized), and whether it was
+    # maximized, when the app last ran.
+    window_width: int = 1342
+    window_height: int = 756
+    window_maximized: bool = False
 
     # Deprecated. These have also been renamed to avoid using them elsewhere in the app.
     _sol: bool = field(default=True, metadata=config(field_name="serve_over_lan"))
@@ -259,12 +279,9 @@ class AppConfiguration(DataClassJsonMixin):
         assert self.filename
         # Save the config as YAML.
         self.filename.parent.mkdir(parents=True, exist_ok=True)
-        json = self.to_json(indent=2, sort_keys=True)
-        with open(self.filename, "w+") as f:
-            f.write(json)
+        _write_atomically(self.filename, self.to_json(indent=2, sort_keys=True).encode())
 
         # Save the state for the current provider.
         if state_filename := self._state_file_location:
             state_filename.parent.mkdir(parents=True, exist_ok=True)
-            with open(state_filename, "wb+") as f:
-                pickle.dump(self.state, f)
+            _write_atomically(state_filename, pickle.dumps(self.state))

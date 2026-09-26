@@ -300,15 +300,16 @@ APP      := $(BUILD)/Sublime Music.app
 ICNS     := $(BUILD)/$(NAME).icns
 PKG      := dist/SublimeMusic-$(VERSION)-$(FLAVOUR).pkg
 
-$(ICNS): $(wildcard logo/rendered/*.png)
+# The macOS icon is its own image (logo/mac-icon.png, 1024x1024: the shape and margins
+# macOS icons have), scaled to each size of the iconset.
+MAC_ICON := logo/mac-icon.png
+
+$(ICNS): $(MAC_ICON)
 	rm -rf $(BUILD)/icon.iconset && mkdir -p $(BUILD)/icon.iconset
-	cp logo/rendered/16.png $(BUILD)/icon.iconset/icon_16x16.png
-	cp logo/rendered/32.png $(BUILD)/icon.iconset/icon_16x16@2x.png
-	cp logo/rendered/32.png $(BUILD)/icon.iconset/icon_32x32.png
-	cp logo/rendered/64.png $(BUILD)/icon.iconset/icon_32x32@2x.png
-	cp logo/rendered/128.png $(BUILD)/icon.iconset/icon_128x128.png
-	cp logo/rendered/512.png $(BUILD)/icon.iconset/icon_512x512.png
-	cp logo/rendered/1024.png $(BUILD)/icon.iconset/icon_512x512@2x.png
+	for size in 16 32 128 256 512; do \
+	    sips -z $$size $$size $(MAC_ICON) --out $(BUILD)/icon.iconset/icon_$${size}x$${size}.png >/dev/null; \
+	    sips -z $$((size * 2)) $$((size * 2)) $(MAC_ICON) --out $(BUILD)/icon.iconset/icon_$${size}x$${size}@2x.png >/dev/null; \
+	done
 	iconutil -c icns -o $@ $(BUILD)/icon.iconset
 
 pkg: ## macOS only: build "Sublime Music.app" and dist/SublimeMusic-<version>-<flavour>.pkg

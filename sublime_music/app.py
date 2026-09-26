@@ -2,6 +2,7 @@ import logging
 import os
 import random
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -66,6 +67,9 @@ from .ui.state import RepeatType, UIState
 from .util import resolve_path
 
 MACOS_THEME_SYNC_INTERVAL_SECONDS = 5
+# Saves the settings and the UI state this often, so that the app being killed or
+# crashing loses at most this much of them.
+AUTOSAVE_INTERVAL_SECONDS = 30
 
 
 NSUserDefaults: Any = None
@@ -208,6 +212,14 @@ class SublimeMusicApp(Gtk.Application):
             "update-play-queue-from-server",
             lambda a, p: self.update_play_state_from_server(),
         )
+        # With an "app.quit" action, GTK on macOS runs it for Cmd+Q, the Dock's Quit and
+        # logging out. Without one it ends the process there and then, without the
+        # shutdown that saves the settings, the UI state and the play queue.
+        add_action("quit", lambda *a: self.quit())
+
+        # Also shut down properly when asked to by a signal (kill, a session ending...).
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, self._quit_from_signal)
+        GLib.timeout_add_seconds(AUTOSAVE_INTERVAL_SECONDS, self._autosave)
 
         if tap_imported:
             self.tap = osxmmkeys.Tap()
@@ -292,6 +304,7 @@ class SublimeMusicApp(Gtk.Application):
         # Windows are associated with the application when the last one is
         # closed the application shuts down.
         self.window = MainWindow(application=self, title="Sublime Music")
+        self._restore_window_size()
 
         # Configure the CSS provider so that we can style elements on the
         # window.
@@ -313,6 +326,8 @@ class SublimeMusicApp(Gtk.Application):
         self.window.connect("go-to", self.on_window_go_to)
         self.window.connect("key-press-event", self.on_window_key_press)
         self.window.connect("focus-in-event", self.on_window_focus_in)
+        self.window.connect("size-allocate", self.on_window_size_allocate)
+        self.window.connect("window-state-event", self.on_window_state_event)
         self.window.player_controls.connect("song-scrub", self.on_song_scrub)
         self.window.player_controls.connect("device-update", self.on_device_update)
         self.window.player_controls.connect("volume-change", self.on_volume_change)
@@ -1175,6 +1190,45 @@ class SublimeMusicApp(Gtk.Application):
                 self.app_config.state.song_progress,
                 self.app_config.state.playing,
             )
+
+    def _quit_from_signal(self) -> bool:
+        self.quit()
+        return False
+
+    def _autosave(self) -> bool:
+        if self.exiting:
+            return False
+        if self.window and self.app_config.provider is not None:
+            try:
+                self.app_config.save()
+            except Exception:
+                logging.exception("Could not save the configuration")
+        return True
+
+    def _restore_window_size(self):
+        width, height = self.app_config.window_width, self.app_config.window_height
+        # Not bigger than the screen: it may be smaller than the last one was.
+        display = Gdk.Display.get_default()
+        monitor = display and (display.get_primary_monitor() or display.get_monitor(0))
+        if monitor:
+            workarea = monitor.get_workarea()
+            width, height = min(width, workarea.width), min(height, workarea.height)
+        self.window.set_default_size(max(width, 400), max(height, 300))
+        if self.app_config.window_maximized:
+            self.window.maximize()
+
+    def on_window_size_allocate(self, window: Gtk.Window, _: Any):
+        # The size to go back to: not the maximized or full screen one.
+        state = window.get_window() and window.get_window().get_state()
+        if state is None or not state & (Gdk.WindowState.MAXIMIZED | Gdk.WindowState.FULLSCREEN):
+            self.app_config.window_width, self.app_config.window_height = window.get_size()
+
+    def on_window_state_event(self, window: Gtk.Window, event: Gdk.EventWindowState) -> bool:
+        if event.changed_mask & Gdk.WindowState.MAXIMIZED:
+            self.app_config.window_maximized = bool(
+                event.new_window_state & Gdk.WindowState.MAXIMIZED
+            )
+        return False
 
     def on_window_focus_in(self, *args) -> bool:
         # The settings daemon sends the media keys to the most recent grabber, so grab

@@ -441,7 +441,6 @@ class PlaylistDetailPanel(Gtk.Overlay):
 
         self.playlist_songs = Gtk.TreeView(
             model=self.playlist_song_store,
-            reorderable=True,
             margin_top=15,
             enable_search=True,
         )
@@ -462,6 +461,7 @@ class PlaylistDetailPanel(Gtk.Overlay):
         self.playlist_songs.append_column(SongListColumn("ARTIST", 4))
         self.playlist_songs.append_column(SongListColumn("DURATION", 5, align=1, width=40))
 
+        util.make_reorderable(self.playlist_songs)
         self.playlist_songs.connect("row-activated", self.on_song_activated)
         self.playlist_songs.connect("button-press-event", self.on_song_button_press)
 
