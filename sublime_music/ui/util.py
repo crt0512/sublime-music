@@ -282,6 +282,22 @@ def diff_model_store(store_to_edit: Any, new_store: Iterable[Any]):
     store_to_edit.splice(0, len(store_to_edit), new_models)
 
 
+def _popover_list_max_height(relative_to: Any, x: int, y: int) -> int:
+    """
+    How tall a scrollable list inside a popover pointing at (``x``, ``y``) of
+    ``relative_to`` may get: the larger of the spaces above and below that point in
+    the window (the popover opens on whichever side fits), minus room for the
+    popover's other widgets, arrow and frame.
+    """
+    window = relative_to.get_toplevel()
+    point = relative_to.translate_coordinates(window, x, y) if window else None
+    if not point:
+        return 400
+    window_height = window.get_allocated_height()
+    available = max(point[1], window_height - point[1]) - 150
+    return max(120, min(400, available))
+
+
 def show_song_popover(
     song_ids: List[str],
     x: int,
@@ -431,10 +447,50 @@ def show_song_popover(
         # Back button
         playlists_vbox.add(Gtk.ModelButton(inverted=True, centered=True, menu_name="main"))
 
+        filter_entry = Gtk.SearchEntry(placeholder_text="Filter playlists", margin=5)
+        playlists_vbox.add(filter_entry)
+
         # Loading indicator
         loading_indicator = Gtk.Spinner(name="menu-item-spinner")
         loading_indicator.start()
         playlists_vbox.add(loading_indicator)
+
+        # The playlists themselves: as tall as they need, but scrollable when there are
+        # more than fit in the window.
+        playlist_buttons_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        playlists_scroll = Gtk.ScrolledWindow(
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            propagate_natural_height=True,
+            propagate_natural_width=True,
+            max_content_height=_popover_list_max_height(relative_to, x, y),
+        )
+        playlists_scroll.add(playlist_buttons_box)
+        playlists_vbox.pack_start(playlists_scroll, True, True, 0)
+
+        no_match_label = Gtk.Label(label="No matching playlists", margin=10, no_show_all=True)
+        no_match_label.get_style_context().add_class("dim-label")
+        playlists_vbox.add(no_match_label)
+
+        playlist_buttons: List[Tuple[Gtk.ModelButton, str]] = []
+
+        def visible_playlist_buttons() -> List[Gtk.ModelButton]:
+            query = filter_entry.get_text().strip().casefold()
+            return [b for b, name in playlist_buttons if query in name]
+
+        def on_filter_changed(_: Any):
+            visible = visible_playlist_buttons()
+            for button, _ in playlist_buttons:
+                button.set_visible(button in visible)
+            no_match_label.set_visible(not visible and bool(playlist_buttons))
+
+        def on_filter_activate(_: Any):
+            # Enter picks the first playlist that matches the filter.
+            if visible := visible_playlist_buttons():
+                visible[0].clicked()
+
+        filter_entry.connect("search-changed", on_filter_changed)
+        filter_entry.connect("activate", on_filter_activate)
+        filter_entry.connect("stop-search", lambda *a: popover.popdown())
 
         # Create a future to make the actual playlist buttons
         def on_get_playlists_done(f: Result[List[Playlist]]):
@@ -445,10 +501,20 @@ def show_song_popover(
                 button.get_style_context().add_class("menu-button")
                 button.connect("clicked", on_add_to_playlist_click, playlist)
                 button.show()
-                playlists_vbox.pack_start(button, False, True, 0)
+                playlist_buttons_box.pack_start(button, False, True, 0)
+                playlist_buttons.append((button, playlist.name.casefold()))
+
+            on_filter_changed(filter_entry)
 
         playlists_result = AdapterManager.get_playlists()
         playlists_result.add_done_callback(lambda f: GLib.idle_add(on_get_playlists_done, f))
+
+        # Start typing as soon as the sub-menu opens.
+        def on_submenu_changed(*a):
+            if popover.get_property("visible-submenu") == "add-to-playlist":
+                GLib.idle_add(filter_entry.grab_focus)
+
+        popover.connect("notify::visible-submenu", on_submenu_changed)
 
     popover.add(playlists_vbox)
     popover.child_set_property(playlists_vbox, "submenu", "add-to-playlist")
