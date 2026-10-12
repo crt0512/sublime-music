@@ -8,6 +8,7 @@ from ..adapters import AdapterManager, DownloadProgress, Result, api_objects as 
 from ..config import MAX_PLAY_FROM_HERE_COUNT, AppConfiguration, ProviderConfiguration
 from ..players import PlayerManager
 from ..players.chromecast import ChromecastPlayer
+from ..players.upnp import UPnPPlayer
 from ..ui import albums, artists, browse, player_controls, playlists, songs, util
 from ..ui.common import DigitsEntry, IconButton, IconMenuButton, SpinnerImage
 
@@ -209,6 +210,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.resume_prompt_timeout_entry.set_value(app_config.resume_prompt_timeout_seconds)
         self.go_to_album_fallback_combo.set_active_id(app_config.go_to_album_fallback_sort)
         self.chromecast_enabled_switch.set_active(app_config.chromecast_enabled)
+        self.upnp_enabled_switch.set_active(app_config.upnp_enabled)
 
         # Player settings
         for c in self.player_settings_box.get_children():
@@ -233,6 +235,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         for player_name, options in player_manager.get_configuration_options().items():
             if player_name == ChromecastPlayer.name and not app_config.chromecast_enabled:
+                continue
+            if player_name == UPnPPlayer.name and not app_config.upnp_enabled:
                 continue
             self.player_settings_box.add(Gtk.Separator())
             self.player_settings_box.add(
@@ -882,6 +886,10 @@ class MainWindow(Gtk.ApplicationWindow):
             "Enable Chromecast", "chromecast_enabled"
         )
         vbox.add(chromecast_box)
+        upnp_box, self.upnp_enabled_switch = self._create_toggle_menu_button(
+            "Enable UPnP / DLNA", "upnp_enabled"
+        )
+        vbox.add(upnp_box)
 
         # PLAYER SETTINGS
         # ==============================================================================

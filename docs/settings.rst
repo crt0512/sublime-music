@@ -26,12 +26,29 @@ Serve Local Files to Chromecasts on the LAN : (``bool``)
     If you are having trouble playing on your Chromecast, try disabling this
     feature.
 
-LAN Server Port Number : (``int``)
-    The port number to use for streaming to Chromecast devices on the same
-    LAN.
-    A server will be started on this port and when you play a song that is
-    already cached locally, the Chromecast will connect to your computer and
-    stream from it instead of from the internet.
+Enable Chromecast / Enable UPnP / DLNA : (``bool``)
+    Whether to look for Chromecasts, resp. UPnP / DLNA renderers (network
+    speakers, AV receivers, TVs, Kodi...), on the LAN. Switching one off also
+    stops its LAN server and hides its settings. The device button in the
+    player bar is hidden when both are off.
+
+Stream Songs Through This Computer : (``bool``, default on)
+    If on, UPnP / DLNA renderers get every song from Sublime Music: locally
+    cached songs directly, and the others relayed from the music server. The
+    renderer then only ever talks plain HTTP to a machine on its own network,
+    which spares it HTTPS, VPNs and whatever else it may not cope with (many
+    renderers are picky about what they will fetch). If off, the renderer
+    streams everything from the music server directly.
+
+    Songs in a format the renderer can't play (it says which it plays, and is
+    believed when it refuses or immediately stops one) are transcoded to MP3:
+    the music server is asked to, and if it doesn't, Sublime Music does it with
+    ``ffmpeg`` (when it is installed), which takes a few seconds before the
+    song starts.
+
+The LAN servers listen on a free port picked by the operating system each time
+Sublime Music starts; there is nothing to configure. If a firewall sits between
+Sublime Music and the devices, it has to let the devices reach this computer.
 
 Allow Song Downloads : (``bool``)
     If toggled on, this will allow songs to be downloaded and cached locally.

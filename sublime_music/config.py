@@ -174,6 +174,8 @@ class AppConfiguration(DataClassJsonMixin):
     # Chromecast support. Off means no device discovery, no LAN file server and no
     # device button at all.
     chromecast_enabled: bool = True
+    # UPnP / DLNA renderer support, likewise.
+    upnp_enabled: bool = True
 
     # "Go to album" keeps the current album sort when it lists every album; from a view
     # that shows only some (starred, by genre...), it switches to this one instead. The
@@ -231,7 +233,17 @@ class AppConfiguration(DataClassJsonMixin):
                 },
             }
 
-        self.version = 6
+        if self.version < 8:
+            # The UPnP player's settings (it's new). The LAN file servers now listen on
+            # a free port picked by the OS, so the port setting is gone. (Version 7 was
+            # a short-lived draft of this setting under another name.)
+            for options in self.player_config.values():
+                options.pop("LAN Server Port Number", None)
+            upnp = self.player_config.setdefault("UPnP / DLNA", {})
+            upnp.pop("Serve Local Files to UPnP Devices on the LAN", None)
+            upnp.setdefault("Stream Songs Through This Computer", True)
+
+        self.version = 8
         self.state.migrate()
 
     @property

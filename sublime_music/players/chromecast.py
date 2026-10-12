@@ -1,23 +1,16 @@
-import base64
-import io
 import logging
-import mimetypes
-import multiprocessing
-import os
-import socket
 from datetime import timedelta
-from multiprocessing.process import BaseProcess
-from typing import Any, Callable, Dict, Optional, Protocol, Set, Tuple, Type, Union, cast
+from typing import Any, Callable, Dict, Optional, Set, Tuple, Type, Union, cast
 from urllib.parse import urlparse
 from uuid import UUID
 
-import bottle
 import pychromecast
 from gi.repository import GLib
 
 from ..adapters import AdapterManager
 from ..adapters.api_objects import Song
 from .base import Player, PlayerDeviceEvent, PlayerEvent
+from .lan_server import LanFileServer
 
 try:
     from pychromecast.controllers.media import MediaStatusListener
@@ -26,37 +19,6 @@ except ImportError:  # pychromecast before 10 has no listener base classes
     MediaStatusListener = CastStatusListener = object  # type: ignore[misc, assignment]
 
 SERVE_FILES_KEY = "Serve Local Files to Chromecasts on the LAN"
-LAN_PORT_KEY = "LAN Server Port Number"
-
-
-class _ProcessContext(Protocol):
-    """The part of a multiprocessing context that is used here.
-
-    typeshed only declares ``Process`` on the concrete contexts (fork, spawn, default),
-    not on ``BaseContext``, so the helper below is typed structurally instead. A
-    read-only property (rather than an attribute) lets each context's own Process
-    subclass satisfy it.
-    """
-
-    @property
-    def Process(self) -> Type[BaseProcess]:  # noqa: N802 (matches multiprocessing)
-        ...
-
-
-def _server_process_context() -> _ProcessContext:
-    """
-    Return the multiprocessing context for the Chromecast LAN file server.
-
-    The server process serves files via the already-configured AdapterManager and
-    shared token/song-id buffers, so it relies on fork-style state inheritance. macOS
-    defaults to spawn, and frozen spawn would also need to pickle the whole
-    ChromecastPlayer, including GTK callbacks from the app. Prefer fork when the
-    platform offers it and fall back to the default context elsewhere.
-    """
-    try:
-        return multiprocessing.get_context("fork")
-    except ValueError:
-        return multiprocessing.get_context()
 
 
 class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
@@ -69,12 +31,13 @@ class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
 
     @staticmethod
     def get_configuration_options() -> Dict[str, Union[Type, Tuple[str, ...]]]:
-        return {SERVE_FILES_KEY: bool, LAN_PORT_KEY: int}
+        return {SERVE_FILES_KEY: bool}
 
     @property
     def supported_schemes(self) -> Set[str]:
         schemes = {"http", "https"}
-        if self.config.get(SERVE_FILES_KEY):
+        # Only while the LAN server is up; otherwise stream from the music server.
+        if self.config.get(SERVE_FILES_KEY) and self.server.running:
             schemes.add("file")
         return schemes
 
@@ -88,7 +51,7 @@ class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
         player_device_change_callback: Callable[[PlayerDeviceEvent], None],
         config: Dict[str, Union[str, int, bool]],
     ):
-        self.server_process: Optional[BaseProcess] = None
+        self.server = LanFileServer("Chromecasts")
         self.on_timepos_change = on_timepos_change
         self.on_track_end = on_track_end
         self.on_player_event = on_player_event
@@ -117,18 +80,10 @@ class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
     def change_settings(self, config: Dict[str, Union[str, int, bool]]):
         self.config = config
         if self.config.get(SERVE_FILES_KEY):
-            # Try and terminate the existing process if it exists.
-            if self.server_process is not None:
-                try:
-                    self.server_process.terminate()
-                except Exception:
-                    pass
-
-            self.server_process = _server_process_context().Process(
-                target=self._run_server_process,
-                args=("0.0.0.0", self.config.get(LAN_PORT_KEY)),
-            )
-            self.server_process.start()
+            if not self.server.running:
+                self.server.start()
+        else:
+            self.server.stop()
 
     def refresh_players(self):
         for id_, chromecast in self._chromecasts.items():
@@ -219,8 +174,7 @@ class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
         pass
 
     def shutdown(self):
-        if self.server_process:
-            self.server_process.terminate()
+        self.server.stop()
 
         if self.chromecast_browser:
             try:
@@ -233,42 +187,6 @@ class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
             self._current_chromecast.quit_app()
         except Exception:
             pass
-
-    _serving_song_id = multiprocessing.Array("c", 1024)  # huge buffer, just in case
-    _serving_token = multiprocessing.Array("c", 16)
-
-    def _run_server_process(self, host: str, port: int):
-        app = bottle.Bottle()
-
-        @app.route("/")
-        def index() -> str:
-            return """
-            <h1>Sublime Music Local Music Server</h1>
-            <p>
-                Sublime Music uses this port as a server for serving music to
-                Chromecasts on the same LAN.
-            </p>
-            """
-
-        @app.route("/s/<token>")
-        def stream_song(token: str) -> bytes:
-            # typing doesn't support multiprocessing.Value very well
-            if token != self._serving_token.value.decode():  # type: ignore
-                raise bottle.HTTPError(status=401, body="Invalid token.")
-
-            song = AdapterManager.get_song_details(
-                self._serving_song_id.value.decode()  # type: ignore
-            ).result()
-            filename = AdapterManager.get_song_file_uri(song)
-            with open(filename[7:], "rb") as fin:
-                song_buffer = io.BytesIO(fin.read())
-
-            content_type = mimetypes.guess_type(filename)[0]
-            bottle.response.set_header("Content-Type", content_type)
-            bottle.response.set_header("Accept-Ranges", "bytes")
-            return song_buffer.read()
-
-        bottle.run(app, host=host, port=port)
 
     @property
     def playing(self) -> bool:
@@ -302,24 +220,12 @@ class ChromecastPlayer(Player, CastStatusListener, MediaStatusListener):
 
     def play_media(self, uri: str, progress: timedelta, song: Song):
         assert self._current_chromecast
-        scheme = urlparse(uri).scheme
-        if scheme == "file":
-            token = base64.b16encode(os.urandom(8))
-            # typing doesn't support multiprocessing.Value very well
-            self._serving_token.value = token  # type: ignore
-            self._serving_song_id.value = song.id.encode()  # type: ignore
-
-            # If this fails, then we are basically screwed, so don't care if it blows
-            # up.
-            # TODO (#129): this does not work properly when on VPNs when the DNS is
-            # piped over the VPN tunnel.
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            host_ip = s.getsockname()[0]
-            s.close()
-
-            uri = f"http://{host_ip}:{self.config.get(LAN_PORT_KEY)}/s/{token.decode()}"
-            logging.info(f"Serving {song.title} at {uri}")
+        if urlparse(uri).scheme == "file":
+            uri = self.server.serve(
+                uri,
+                peer=getattr(self._current_chromecast.cast_info, "host", None),
+                title=song.title,
+            )
 
         assert AdapterManager._instance
         networked_scheme_priority = ("https", "http")

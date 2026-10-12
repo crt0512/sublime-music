@@ -27,6 +27,9 @@ Features
 
 * Switch between multiple Subsonic-API-compliant [1]_ servers.
 * Play music through Chromecast devices on the same LAN.
+* Play music through UPnP / DLNA renderers (network speakers, AV receivers, TVs,
+  Kodi...) on the same LAN. This needs no extra dependencies; install ``ffmpeg`` to
+  have songs transcoded for renderers that can't play their format.
 * Offline Mode where Sublime Music will not make any network requests.
 * DBus MPRIS interface integration for controlling Sublime Music via clients
   such as ``playerctl``, ``i3status-rust``, KDE Connect, and many commonly used

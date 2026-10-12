@@ -75,22 +75,57 @@ def test_json_load_unload(config_filename: Path, tmp_path: Path):
     )
 
 
-def test_config_migrate_v5_to_v6(config_filename: Path, cwd: Path):
+UPNP_DEFAULTS = {"Stream Songs Through This Computer": True}
+
+
+def test_config_migrate_v5_to_current(config_filename: Path, cwd: Path):
     shutil.copyfile(str(cwd.joinpath("mock_data/config-v5.json")), str(config_filename))
     app_config = AppConfiguration.load_from_file(config_filename)
     app_config.migrate()
 
-    assert app_config.version == 6
+    assert app_config.version == 8
     assert app_config.player_config == {
         "Local Playback": {"Replay Gain": "track"},
-        "Chromecast": {
-            "Serve Local Files to Chromecasts on the LAN": True,
-            "LAN Server Port Number": 6969,
-        },
+        "Chromecast": {"Serve Local Files to Chromecasts on the LAN": True},
+        "UPnP / DLNA": UPNP_DEFAULTS,
     }
     app_config.save()
     app_config2 = AppConfiguration.load_from_file(config_filename)
     assert app_config == app_config2
+
+
+def test_config_migrate_v6_to_v8(tmp_path: Path):
+    # v8 adds the UPnP player's settings and drops the LAN server port settings.
+    config_filename = tmp_path / "config.json"
+    config_filename.write_text(
+        '{"version": 6, "providers": {}, "player_config": {"Local Playback": '
+        '{"Replay Gain": "Album"}, "Chromecast": {"LAN Server Port Number": 1, '
+        '"Serve Local Files to Chromecasts on the LAN": false}}}'
+    )
+
+    config = AppConfiguration.load_from_file(config_filename)
+
+    assert config.version == 8
+    assert config.upnp_enabled is True
+    assert config.player_config == {
+        "Local Playback": {"Replay Gain": "Album"},
+        "Chromecast": {"Serve Local Files to Chromecasts on the LAN": False},
+        "UPnP / DLNA": UPNP_DEFAULTS,
+    }
+
+
+def test_config_migrate_v7_to_v8_renames_the_upnp_setting(tmp_path: Path):
+    config_filename = tmp_path / "config.json"
+    config_filename.write_text(
+        '{"version": 7, "providers": {}, "player_config": {"UPnP / DLNA": '
+        '{"Serve Local Files to UPnP Devices on the LAN": false, "LAN Server Port Number": 2}}}'
+    )
+
+    config = AppConfiguration.load_from_file(config_filename)
+
+    assert config.version == 8
+    # The draft setting meant something else, so the new one gets its default.
+    assert config.player_config == {"UPnP / DLNA": UPNP_DEFAULTS}
 
 
 def test_new_settings_default_for_old_config_files(tmp_path: Path):

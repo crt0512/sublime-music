@@ -61,6 +61,25 @@ Playing integration and the appearance check (bundled into the app, and installe
   shows how many.
 * Chromecast support can be switched off completely in Settings > Devices (no device
   discovery, no LAN server, no device button).
+* UPnP / DLNA renderers (network speakers, AV receivers, smart TVs, Kodi, gmediarender...)
+  on the LAN show up in the device popover next to Chromecasts and can be played on:
+  play/pause, seek, volume and mute, cover art and metadata on the renderer. By
+  default the renderer gets every song from this computer (cached songs directly, the
+  rest relayed from the music server), because renderers are unpredictable about what
+  they will fetch themselves (a Sonos Play:3 refused a FLAC over HTTPS); "Stream Songs
+  Through This Computer" in Settings > UPnP / DLNA turns that off. Songs in a format the
+  renderer doesn't list as playable (a Samsung TV plays nothing but MP3 over DLNA) are
+  transcoded to one it lists: the music server is asked to, and if it doesn't, ``ffmpeg``
+  does it here (so it is now a recommended dependency). Streams are delivered the way
+  strict DLNA devices expect them (HTTP/1.1, DLNA profile names, a file extension in
+  the URL, a known length). Renderers are controlled with SSDP and SOAP directly, so no
+  new dependencies. Like Chromecast support, it can be switched off in Settings >
+  Devices.
+* The LAN file servers (Chromecast and UPnP) listen on a free port picked by the OS
+  instead of a configured one, so a port that is already taken can't break them; the
+  "LAN Server Port Number" setting is gone. They also answer HEAD and Range requests
+  now, which renderers need for seeking, and advertise the address of the network the
+  device is actually on (not a VPN that happens to be the default route).
 * The "resume the play queue?" prompt hides itself after 5 seconds (configurable in
   Settings > Play Queue, 0 = never).
 * The search popover is only as tall as its results, shows a hint before searching and

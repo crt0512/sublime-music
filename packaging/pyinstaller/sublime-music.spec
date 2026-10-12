@@ -115,9 +115,11 @@ if MACOS:
             "LSApplicationCategoryType": "public.app-category.music",
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
-            # Chromecast discovery uses mDNS; without these macOS silently blocks it.
+            # Chromecast discovery uses mDNS and UPnP discovery uses SSDP multicast;
+            # without these macOS silently blocks them.
             "NSLocalNetworkUsageDescription": (
-                "Sublime Music looks for Chromecast devices on the local network."
+                "Sublime Music looks for Chromecast and UPnP / DLNA devices on the local "
+                "network."
             ),
             "NSBonjourServices": ["_googlecast._tcp"],
         },

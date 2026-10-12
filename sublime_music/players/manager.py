@@ -6,11 +6,12 @@ from ..adapters.api_objects import Song
 from .base import PlayerDeviceEvent, PlayerEvent
 from .chromecast import ChromecastPlayer  # noqa: F401
 from .mpv import MPVPlayer  # noqa: F401
+from .upnp import UPnPPlayer  # noqa: F401
 
 
 class PlayerManager:
     # Available Players. Order matters for UI display.
-    available_player_types: List[Type] = [MPVPlayer, ChromecastPlayer]
+    available_player_types: List[Type] = [MPVPlayer, ChromecastPlayer, UPnPPlayer]
 
     @staticmethod
     def get_configuration_options() -> Dict[str, Dict[str, Union[Type, Tuple[str, ...]]]]:
@@ -32,6 +33,7 @@ class PlayerManager:
         player_device_change_callback: Callable[[PlayerDeviceEvent], None],
         config: Dict[str, Dict[str, Union[Type, Tuple[str, ...]]]],
         chromecast_enabled: bool = True,
+        upnp_enabled: bool = True,
     ):
         self.current_song: Optional[Song] = None
         self.next_song_uri: Optional[str] = None
@@ -55,10 +57,18 @@ class PlayerManager:
 
         self.player_device_change_callback = callback_wrapper
 
+        disabled = {
+            player_type
+            for player_type, enabled in (
+                (ChromecastPlayer, chromecast_enabled),
+                (UPnPPlayer, upnp_enabled),
+            )
+            if not enabled
+        }
         self.players = {
             player_type: self._create_player(player_type)
             for player_type in PlayerManager.available_player_types
-            if chromecast_enabled or player_type is not ChromecastPlayer
+            if player_type not in disabled
         }
 
     def _create_player(self, player_type: Type) -> Any:
@@ -70,20 +80,26 @@ class PlayerManager:
             self.config.get(player_type.name),
         )
 
-    def set_chromecast_enabled(self, enabled: bool):
+    def set_player_enabled(self, player_type: Type, enabled: bool):
         """
-        Starts or stops the Chromecast player (device discovery and the LAN file
-        server). Switch away from a Chromecast before disabling it.
+        Starts or stops a networked player (device discovery and the LAN file server).
+        Switch away from one of its devices before disabling it.
         """
-        if enabled and ChromecastPlayer not in self.players:
-            self.players[ChromecastPlayer] = self._create_player(ChromecastPlayer)
-        elif not enabled and (player := self.players.pop(ChromecastPlayer, None)):
+        if enabled and player_type not in self.players:
+            self.players[player_type] = self._create_player(player_type)
+        elif not enabled and (player := self.players.pop(player_type, None)):
             player.shutdown()
             self.device_id_type_map = {
-                device_id: player_type
-                for device_id, player_type in self.device_id_type_map.items()
-                if player_type is not ChromecastPlayer
+                device_id: pt
+                for device_id, pt in self.device_id_type_map.items()
+                if pt is not player_type
             }
+
+    def set_chromecast_enabled(self, enabled: bool):
+        self.set_player_enabled(ChromecastPlayer, enabled)
+
+    def set_upnp_enabled(self, enabled: bool):
+        self.set_player_enabled(UPnPPlayer, enabled)
 
     def change_settings(
         self,

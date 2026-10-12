@@ -10,7 +10,7 @@ from concurrent.futures import Future
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Type
 from urllib.parse import urlparse
 
 import bleach
@@ -59,6 +59,7 @@ from .desktop_media_keys import DesktopMediaKeys
 from .macos_media import MacOSMediaSession
 from .players import PlayerDeviceEvent, PlayerEvent, PlayerManager
 from .players.chromecast import ChromecastPlayer
+from .players.upnp import DEVICE_ID_PREFIX as UPNP_DEVICE_ID_PREFIX, UPnPPlayer
 from .ui import util
 from .ui.albums import go_to_album_query
 from .ui.configure_provider import ConfigureProviderDialog
@@ -437,8 +438,12 @@ class SublimeMusicApp(Gtk.Application):
 
             self.update_window()
 
-        if not self.app_config.chromecast_enabled:
-            # The saved device may be a Chromecast, which won't be discovered now.
+        saved_device = self.app_config.state.current_device
+        saved_device_is_upnp = saved_device.startswith(UPNP_DEVICE_ID_PREFIX)
+        if (not self.app_config.chromecast_enabled and not saved_device_is_upnp) or (
+            not self.app_config.upnp_enabled and saved_device_is_upnp
+        ):
+            # The saved device's player is off, so it won't be discovered now.
             self.app_config.state.current_device = "this device"
         self.app_config.state.connecting_to_device = True
 
@@ -457,6 +462,7 @@ class SublimeMusicApp(Gtk.Application):
             lambda *a: GLib.idle_add(player_device_change_callback, *a),
             self.app_config.player_config,
             chromecast_enabled=self.app_config.chromecast_enabled,
+            upnp_enabled=self.app_config.upnp_enabled,
         )
         GLib.timeout_add(10000, check_if_connected)
         GLib.timeout_add_seconds(60, self.check_song_library_sync)
@@ -706,7 +712,9 @@ class SublimeMusicApp(Gtk.Application):
             if (offline_mode := settings.get("offline_mode")) is not None:
                 AdapterManager.on_offline_mode_change(offline_mode)
             if (chromecast_enabled := settings.get("chromecast_enabled")) is not None:
-                self._set_chromecast_enabled(chromecast_enabled)
+                self._set_player_enabled(ChromecastPlayer, chromecast_enabled)
+            if (upnp_enabled := settings.get("upnp_enabled")) is not None:
+                self._set_player_enabled(UPnPPlayer, upnp_enabled)
 
             del state_updates["__settings__"]
             self.app_config.save()
@@ -727,15 +735,18 @@ class SublimeMusicApp(Gtk.Application):
             self.app_config.save()
         self.update_window(force=force)
 
-    def _set_chromecast_enabled(self, enabled: bool):
+    def _set_player_enabled(self, player_type: Type, enabled: bool):
         if not (pm := self.player_manager):
             return
         if not enabled:
-            # Move playback back to this computer before the Chromecast player goes.
-            if self.app_config.state.current_device != "this device":
+            # Move playback back to this computer before the player goes.
+            current_device = self.app_config.state.current_device
+            if current_device != "this device" and (
+                pm.device_id_type_map.get(current_device) is player_type
+            ):
                 self.on_device_update(None, "this device")
-            self.app_config.state.available_players[ChromecastPlayer] = set()
-        pm.set_chromecast_enabled(enabled)
+            self.app_config.state.available_players[player_type] = set()
+        pm.set_player_enabled(player_type, enabled)
 
     def on_notification_closed(self, _):
         self.app_config.state.current_notification = None

@@ -20,6 +20,7 @@
         <ul>
             <li>Switch between multiple Subsonic-API-compliant servers.</li>
             <li>Play music through Chromecast devices on the same LAN.</li>
+            <li>Play music through UPnP / DLNA renderers on the same LAN.</li>
             <li>
                 Offline Mode where Sublime Music will not make any network
                 requests.

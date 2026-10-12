@@ -18,6 +18,7 @@ The Albums tab of Sublime Music with the Play Queue opened.
 
 - Switch between multiple Subsonic API (v1.8.0+) compliant servers.
 - Play music through Chromecast devices on the same LAN.
+- Play music through UPnP / DLNA renderers (network speakers, AV receivers, TVs, Kodi...) on the same LAN.
 - Offline Mode where Sublime Music will not make any network requests.
 - Browse songs by the sever reported filesystem structure, or view them organized by ID3 tags in the Albums, Artists, and Playlists views.
 - Intuitive play queue.
@@ -25,6 +26,7 @@ The Albums tab of Sublime Music with the Play Queue opened.
 - Download songs for offline listening.
 - The Songs tab: the whole library in one sortable, filterable table.
 - Cue Replacement Warnings
+- UPnP / DLNA renderer support
 - Makefile and port to MacOS
 - Many many many more... See :
   - [Changelog](CHANGELOG.rst)

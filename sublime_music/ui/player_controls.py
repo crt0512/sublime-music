@@ -150,8 +150,9 @@ class PlayerControls(Gtk.ActionBar):
         elif self.info_popover.is_visible():
             self._fill_song_info()  # the song changed, or e.g. its star
 
-        self.device_button.set_visible(app_config.chromecast_enabled)
-        if not app_config.chromecast_enabled:
+        devices_enabled = app_config.chromecast_enabled or app_config.upnp_enabled
+        self.device_button.set_visible(devices_enabled)
+        if not devices_enabled:
             self.device_popover.popdown()
 
         self.connecting_to_device = app_config.state.connecting_to_device
@@ -880,7 +881,7 @@ class PlayerControls(Gtk.ActionBar):
         info_popover_box.add(self.info_grid)
         self.info_popover.add(info_popover_box)
 
-        # Device button (for chromecast). Hidden while Chromecast support is disabled;
+        # Device button (Chromecast and UPnP). Hidden while both are disabled;
         # no_show_all so that show_all() doesn't bring it back.
         self.device_button = IconButton(
             "chromecast-symbolic",

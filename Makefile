@@ -93,7 +93,8 @@ MACOS_DEPS := $(if $(filter Darwin,$(shell uname)),pyobjc-framework-MediaPlayer,
 
 # What both flavours need from the system.
 SYSTEM_DEPENDS := python3-gi, python3-gi-cairo, gir1.2-gtk-3.0, gir1.2-glib-2.0, libmpv2
-RECOMMENDS     := gir1.2-notify-0.7, gir1.2-nm-1.0
+# ffmpeg: transcoding for UPnP renderers that can't play a song's format.
+RECOMMENDS     := gir1.2-notify-0.7, gir1.2-nm-1.0, ffmpeg
 # The thin flavour gets everything from Debian's packages.
 THIN_DEPENDS   := python3 (>= 3.10), $(SYSTEM_DEPENDS), python3-mpv, python3-peewee, python3-dataclasses-json, python3-requests, python3-dateutil, python3-semver, python3-bottle, python3-bleach, python3-thefuzz, python3-pychromecast
 THIN_RECOMMENDS := $(RECOMMENDS), python3-keyring
