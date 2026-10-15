@@ -100,12 +100,17 @@ class PlayerControls(Gtk.ActionBar):
         # Reserve equal space on both sides, even when their contents differ.
         # Their minimum widths protect the metadata; the seek bar gives up width
         # symmetrically instead of shifting playback toward the smaller side.
+        # Only the outer reservation grows: its controls keep their natural sizes
+        # and stay left-aligned instead of stretching with the song title.
+        right_slot = Gtk.Box(hexpand=True)
+        right_slot.pack_start(rating_play_queue_volume, False, False, 0)
+        song_display.set_hexpand(True)
         self._side_size_group = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
         self._side_size_group.add_widget(song_display)
-        self._side_size_group.add_widget(rating_play_queue_volume)
+        self._side_size_group.add_widget(right_slot)
         self.pack_start(song_display)
         self.set_center_widget(playback_controls)
-        self.pack_end(rating_play_queue_volume)
+        self.pack_end(right_slot)
 
     connecting_to_device_token = 0
     connecting_icon_index = 0
@@ -896,7 +901,7 @@ class PlayerControls(Gtk.ActionBar):
     def create_rating_play_queue_volume(self) -> Gtk.Box:
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         vbox.pack_start(Gtk.Box(), True, True, 0)
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, halign=Gtk.Align.START)
 
         # Song info button
         self.info_button = IconButton(
@@ -1113,9 +1118,10 @@ class PlayerControls(Gtk.ActionBar):
         self.volume_slider.set_draw_value(False)
         self.volume_slider.connect("button-press-event", self._on_scale_button_press, None)
         self.volume_slider.connect("value-changed", self.on_volume_change)
-        box.pack_start(self.volume_slider, True, True, 0)
+        box.pack_start(self.volume_slider, False, False, 0)
 
         if AdapterManager.can_get_song_rating():
+            self.rating_buttons_box.set_halign(Gtk.Align.START)
             vbox.pack_start(self.rating_buttons_box, False, True, 0)
         vbox.pack_start(box, False, True, 0)
         vbox.pack_start(Gtk.Box(), True, True, 0)

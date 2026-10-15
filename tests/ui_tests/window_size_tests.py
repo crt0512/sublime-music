@@ -158,6 +158,72 @@ def test_controls_expand_again_after_split_window_resize(window, monkeypatch, fo
         assert window.get_child().get_preferred_width().minimum_width <= 720
 
 
+@pytest.mark.parametrize("width", [731, 1342, 1600])
+@pytest.mark.parametrize("rating", [False, True])
+@pytest.mark.parametrize("devices", [False, True])
+def test_right_controls_keep_size_and_left_alignment_across_songs(
+    styled_gtk, monkeypatch, width, rating, devices
+):
+    monkeypatch.setattr(player_controls.AdapterManager, "can_get_song_rating", lambda: rating)
+    controls = player_controls.PlayerControls()
+    shell = Gtk.Window()
+    shell.add(controls)
+    shell.set_default_size(width, 180)
+    shell.show_all()
+    controls.star_button.show()
+    controls.device_button.set_visible(devices)
+    controls.song_duration_label.set_text("4:56")
+    row = controls.info_button.get_parent()
+    right = row.get_parent()
+    widgets = [
+        controls.info_button,
+        controls.play_queue_button,
+        controls.volume_mute_toggle,
+        controls.volume_slider,
+    ]
+    if rating:
+        widgets += [controls.rating_buttons_box, *controls.rating_buttons_box.get_children()]
+
+    def geometry():
+        return [
+            (widget.translate_coordinates(controls, 0, 0)[0], widget.get_allocated_width())
+            for widget in widgets
+        ]
+
+    try:
+        _wait_for(
+            lambda: shell.get_size().width == width
+            and controls.volume_slider.get_allocated_width() > 1
+        )
+        initial = None
+        for text in ("Short", "A very long song title and album name " * 30, "Short again"):
+            labels = (controls.song_title, controls.album_name, controls.artist_name)
+            for label in labels:
+                label.set_text(text)
+            # Wait for a frame, not just the unchanged window size: the regression
+            # only appears after GTK has reallocated for the new metadata.
+            loop = GLib.MainLoop()
+            controls.add_tick_callback(lambda *a: loop.quit() or False)
+            loop.run()
+            current = geometry()
+            if initial is None:
+                initial = current
+            else:
+                assert current == initial
+            assert (
+                controls.volume_slider.get_allocated_width()
+                == controls.volume_slider.get_preferred_width().natural_width
+            )
+            assert row.get_halign() == Gtk.Align.START
+            assert row.translate_coordinates(right, 0, 0)[0] == 0
+            if rating:
+                assert controls.rating_buttons_box.get_halign() == Gtk.Align.START
+                assert controls.rating_buttons_box.translate_coordinates(right, 0, 0)[0] == 0
+            _assert_playback_centered(controls)
+    finally:
+        shell.destroy()
+
+
 def test_seekbar_range_and_increments_are_unchanged(window):
     adjustment = window.player_controls.song_scrubber.get_adjustment()
     assert (adjustment.get_lower(), adjustment.get_upper()) == (0, 100)
