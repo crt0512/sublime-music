@@ -161,7 +161,7 @@ def test_controls_expand_again_after_split_window_resize(window, monkeypatch, fo
 @pytest.mark.parametrize("width", [731, 1342, 1600])
 @pytest.mark.parametrize("rating", [False, True])
 @pytest.mark.parametrize("devices", [False, True])
-def test_right_controls_keep_size_and_left_alignment_across_songs(
+def test_right_controls_keep_size_and_right_alignment_across_songs(
     styled_gtk, monkeypatch, width, rating, devices
 ):
     monkeypatch.setattr(player_controls.AdapterManager, "can_get_song_rating", lambda: rating)
@@ -214,11 +214,23 @@ def test_right_controls_keep_size_and_left_alignment_across_songs(
                 controls.volume_slider.get_allocated_width()
                 == controls.volume_slider.get_preferred_width().natural_width
             )
-            assert row.get_halign() == Gtk.Align.START
-            assert row.translate_coordinates(right, 0, 0)[0] == 0
+            assert row.get_halign() == Gtk.Align.END
+            assert (
+                row.translate_coordinates(right, 0, 0)[0] + row.get_allocated_width()
+                == right.get_allocated_width()
+            )
+            slot = right.get_parent()
+            assert (
+                right.translate_coordinates(slot, 0, 0)[0] + right.get_allocated_width()
+                == slot.get_allocated_width()
+            )
             if rating:
-                assert controls.rating_buttons_box.get_halign() == Gtk.Align.START
-                assert controls.rating_buttons_box.translate_coordinates(right, 0, 0)[0] == 0
+                stars = controls.rating_buttons_box
+                assert stars.get_halign() == Gtk.Align.END
+                assert (
+                    stars.translate_coordinates(right, 0, 0)[0] + stars.get_allocated_width()
+                    == right.get_allocated_width()
+                )
             _assert_playback_centered(controls)
     finally:
         shell.destroy()
