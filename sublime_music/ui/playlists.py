@@ -93,7 +93,8 @@ class PlaylistsPanel(Gtk.Paned):
         Gtk.Paned.__init__(self, orientation=Gtk.Orientation.HORIZONTAL)
 
         self.playlist_list = PlaylistList()
-        self.pack1(self.playlist_list, False, False)
+        self.pack1(self.playlist_list, False, True)
+        self.set_position(200)
 
         self.playlist_detail_panel = PlaylistDetailPanel()
         self.playlist_detail_panel.connect(
@@ -137,7 +138,9 @@ class PlaylistList(Gtk.Box):
 
         playlist_list_actions = Gtk.ActionBar()
 
-        self.new_playlist_button = IconButton("list-add-symbolic", label="New Playlist")
+        self.new_playlist_button = IconButton(
+            "list-add-symbolic", "Create a new playlist", label="New"
+        )
         self.new_playlist_button.connect("clicked", self.on_new_playlist_clicked)
         playlist_list_actions.pack_start(self.new_playlist_button)
 
@@ -160,7 +163,9 @@ class PlaylistList(Gtk.Box):
         self.new_playlist_row = Gtk.ListBoxRow(activatable=False, selectable=False)
         new_playlist_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, visible=False)
 
-        self.new_playlist_entry = Gtk.Entry(name="playlist-list-new-playlist-entry")
+        self.new_playlist_entry = Gtk.Entry(
+            name="playlist-list-new-playlist-entry", width_chars=10, max_width_chars=24
+        )
         self.new_playlist_entry.connect("activate", self.new_entry_activate)
         new_playlist_box.add(self.new_playlist_entry)
 
@@ -190,7 +195,7 @@ class PlaylistList(Gtk.Box):
         loading_new_playlist.add(self.new_playlist_row)
         self.add(loading_new_playlist)
 
-        list_scroll_window = Gtk.ScrolledWindow(min_content_width=220)
+        list_scroll_window = Gtk.ScrolledWindow(min_content_width=140)
 
         def create_playlist_row(model: PlaylistList.PlaylistModel) -> Gtk.ListBoxRow:
             row = Gtk.ListBoxRow(
@@ -200,6 +205,7 @@ class PlaylistList(Gtk.Box):
             row.add(
                 Gtk.Label(
                     label=f"<b>{model.name}</b>",
+                    tooltip_text=model.name,
                     use_markup=True,
                     margin=10,
                     halign=Gtk.Align.START,
@@ -405,7 +411,9 @@ class PlaylistDetailPanel(Gtk.Overlay):
         expand_button_container.pack_end(self.expand_collapse_button, False, False, 0)
         action_buttons_container.add(expand_button_container)
 
-        playlist_info_box.pack_end(action_buttons_container, False, False, 5)
+        # Share the metadata column instead of reserving a third horizontal column
+        # for these buttons, which made selecting a playlist force the window wider.
+        playlist_details_box.add(action_buttons_container)
 
         self.playlist_box.add(playlist_info_box)
 

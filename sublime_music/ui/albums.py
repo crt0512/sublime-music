@@ -134,6 +134,9 @@ class AlbumsPanel(Gtk.Box):
         actionbar.pack_start(self.alphabetical_type_combo)
 
         self.genre_combo, self.genre_combo_store = self.make_combobox((), self.on_genre_change)
+        genre_renderer = self.genre_combo.get_cells()[0]
+        genre_renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
+        genre_renderer.set_property("max-width-chars", 24)
         actionbar.pack_start(self.genre_combo)
 
         next_decade = (datetime.datetime.now().year // 10) * 10 + 10
@@ -156,7 +159,8 @@ class AlbumsPanel(Gtk.Box):
         self.sort_toggle.connect("clicked", self.on_sort_toggle_clicked)
         actionbar.pack_start(self.sort_toggle)
 
-        # Add the page widget.
+        # Pagination and count live on a second row so filters fit a split window.
+        pagination_bar = Gtk.ActionBar()
         self.page_widget = page_widget = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         self.prev_page = IconButton(
             "go-previous-symbolic", "Go to the previous page", sensitive=False
@@ -175,7 +179,7 @@ class AlbumsPanel(Gtk.Box):
         self.next_page = IconButton("go-next-symbolic", "Go to the next page", sensitive=False)
         self.next_page.connect("clicked", self.on_next_page_clicked)
         page_widget.add(self.next_page)
-        actionbar.set_center_widget(page_widget)
+        pagination_bar.pack_start(page_widget)
 
         self.refresh_button = IconButton(
             "view-refresh-symbolic", "Refresh list of albums", relief=True
@@ -183,16 +187,17 @@ class AlbumsPanel(Gtk.Box):
         self.refresh_button.connect("clicked", self.on_refresh_clicked)
         actionbar.pack_end(self.refresh_button)
 
-        actionbar.pack_end(Gtk.Label(label="albums per page"))
+        pagination_bar.pack_end(Gtk.Label(label="albums per page"))
         self.show_count_dropdown, _ = self.make_combobox(
             [(x, x, True) for x in ("20", "30", "40", "50", "75", "100")]
             + [(str(ALL_ALBUMS), "All", True)],
             self.on_show_count_dropdown_change,
         )
-        actionbar.pack_end(self.show_count_dropdown)
-        actionbar.pack_end(Gtk.Label(label="Show"))
+        pagination_bar.pack_end(self.show_count_dropdown)
+        pagination_bar.pack_end(Gtk.Label(label="Show"))
 
         self.add(actionbar)
+        self.add(pagination_bar)
 
         scrolled_window = Gtk.ScrolledWindow()
         self.grid = AlbumsGrid()
@@ -597,6 +602,7 @@ class AlbumsGrid(Gtk.Overlay):
         self.window_start = 0
         self.loaded_count = ALL_ALBUMS_BATCH
         self._load_more_pending = False
+        self._changing_window = False
         self._hold: Optional[Tuple["AlbumsGrid._AlbumModel", int, bool]] = None
         # While switching albums the content keeps its height (see _keep_height).
         self._height_kept = False
@@ -738,7 +744,12 @@ class AlbumsGrid(Gtk.Overlay):
         # Nothing shown, not laid out yet (the adjustment would say "empty"), or the last
         # batch not laid out yet (its tiles have no position for _hold_in_place). The
         # layout changes the adjustment, which checks again.
-        if self._hold is not None or len(self.list_store_top) == 0:
+        if (
+            self._changing_window
+            or self._pending_reflow is not None
+            or self._hold is not None
+            or len(self.list_store_top) == 0
+        ):
             return False
         shown = list(self.list_store_top) + list(self.list_store_bottom)
         return all(
@@ -786,53 +797,78 @@ class AlbumsGrid(Gtk.Overlay):
 
     def _load_after(self):
         """Shows the next batch; drops rows from the start beyond MAX_LOADED_ALBUMS."""
-        shown = self._window(self.current_models)
-        if self.loaded_count + ALL_ALBUMS_BATCH > MAX_LOADED_ALBUMS:
-            # Albums will be dropped from the start (adding them at the end doesn't move
-            # anything on the screen).
-            self._hold_in_place(shown[-1])
+        if self._changing_window or self._pending_reflow is not None:
+            return
         end = self.window_start + self.loaded_count
         new_albums = self._ordered(self.current_models)[end : end + ALL_ALBUMS_BATCH]
-        self.loaded_count += len(new_albums)
-        # Everything after the open album's row is in the bottom grid.
-        store = (
-            self.list_store_top
-            if self.currently_selected_index is None
-            else self.list_store_bottom
-        )
-        store.splice(len(store), 0, new_albums)
-
-        if (excess := self.loaded_count - MAX_LOADED_ALBUMS) > 0:
-            drop = min(self._whole_rows(excess), self.loaded_count)
-            if self.currently_selected_index is not None and drop >= len(self.list_store_top):
-                self._close_detail_now()  # the open album is one of them
-            self.list_store_top.splice(0, drop, [])
-            self.window_start += drop
-            self.loaded_count -= drop
-
-    def _load_before(self):
-        """Shows the previous batch again; drops albums from the end beyond
-        MAX_LOADED_ALBUMS."""
-        shown = self._window(self.current_models)
-        self._hold_in_place(shown[0])
-        count = min(self._whole_rows(ALL_ALBUMS_BATCH), self.window_start)
-        new_albums = self._ordered(self.current_models)[
-            self.window_start - count : self.window_start
-        ]
-        self.list_store_top.splice(0, 0, new_albums)
-        self.window_start -= count
-        self.loaded_count += count
-
-        if (drop := self.loaded_count - MAX_LOADED_ALBUMS) > 0:
-            if self.currently_selected_index is not None and drop > len(self.list_store_bottom):
-                self._close_detail_now()  # the open album is one of them
+        if not new_albums:
+            return
+        self._changing_window = True
+        closed = False
+        try:
+            shown = self._window(self.current_models)
+            if self.loaded_count + len(new_albums) > MAX_LOADED_ALBUMS:
+                # Keep a surviving tile anchored while whole rows above it are dropped.
+                self._hold_in_place(shown[-1])
+            self.loaded_count += len(new_albums)
+            # Everything after the open album's row is in the bottom grid.
             store = (
                 self.list_store_top
                 if self.currently_selected_index is None
                 else self.list_store_bottom
             )
-            store.splice(len(store) - drop, drop, [])
-            self.loaded_count -= drop
+            store.splice(len(store), 0, new_albums)
+
+            if (excess := self.loaded_count - MAX_LOADED_ALBUMS) > 0:
+                drop = min(self._whole_rows(excess), self.loaded_count)
+                if self.currently_selected_index is not None and drop >= len(self.list_store_top):
+                    self._close_detail_now()
+                    closed = True
+                self.list_store_top.splice(0, drop, [])
+                self.window_start += drop
+                self.loaded_count -= drop
+        finally:
+            self._changing_window = False
+        if closed:
+            # A signal handler may synchronously update/reflow: publish only after both
+            # stores and the window offsets agree, never in the middle of a splice.
+            self.emit("cover-clicked", None)
+
+    def _load_before(self):
+        """Shows the previous batch again; drops albums from the end beyond
+        MAX_LOADED_ALBUMS."""
+        if self._changing_window or self._pending_reflow is not None or self.window_start == 0:
+            return
+        count = min(self._whole_rows(ALL_ALBUMS_BATCH), self.window_start)
+        new_albums = self._ordered(self.current_models)[
+            self.window_start - count : self.window_start
+        ]
+        self._changing_window = True
+        closed = False
+        try:
+            shown = self._window(self.current_models)
+            self._hold_in_place(shown[0])
+            self.list_store_top.splice(0, 0, new_albums)
+            self.window_start -= count
+            self.loaded_count += count
+
+            if (drop := self.loaded_count - MAX_LOADED_ALBUMS) > 0:
+                if self.currently_selected_index is not None and drop > len(
+                    self.list_store_bottom
+                ):
+                    self._close_detail_now()
+                    closed = True
+                store = (
+                    self.list_store_top
+                    if self.currently_selected_index is None
+                    else self.list_store_bottom
+                )
+                store.splice(len(store) - drop, drop, [])
+                self.loaded_count -= drop
+        finally:
+            self._changing_window = False
+        if closed:
+            self.emit("cover-clicked", None)
 
     def _close_detail_now(self):
         """Closes the open album without animating (it is far out of view) and puts all
@@ -851,8 +887,9 @@ class AlbumsGrid(Gtk.Overlay):
         self.list_store_bottom.splice(0, len(below), [])
         self.list_store_top.splice(len(self.list_store_top), 0, below)
         self.currently_selected_index = None
+        self.currently_selected_id = None
         self.grid_top.unselect_all()
-        self.emit("cover-clicked", None)  # so that the app forgets the selection too
+        # The batch caller notifies the app once eviction and offsets are committed.
 
     # Keeping an album in the same place on the screen while things around it change
     # =========================================================================
@@ -954,7 +991,7 @@ class AlbumsGrid(Gtk.Overlay):
             self.loaded_count = ALL_ALBUMS_BATCH
 
         def do_update_grid(selected_index: Optional[int]):
-            if self.sort_dir == "descending" and selected_index:
+            if self.sort_dir == "descending" and selected_index is not None:
                 selected_index = len(self.current_models) - selected_index - 1
 
             self.reflow_grids(
@@ -1079,19 +1116,12 @@ class AlbumsGrid(Gtk.Overlay):
     # Event Handlers
     # =========================================================================
     def on_child_activated(self, flowbox: Gtk.FlowBox, child: Gtk.Widget):
-        click_top = flowbox == self.grid_top
-        selected_index = child.get_index()
-
-        if click_top:
-            page_offset = self._window_offset()
-            if self.currently_selected_index is not None and (
-                selected_index == self.currently_selected_index - page_offset
-            ):
-                self.emit("cover-clicked", None)
-            else:
-                self.emit("cover-clicked", self.list_store_top[selected_index].id)
-        else:
-            self.emit("cover-clicked", self.list_store_bottom[selected_index].id)
+        if self._changing_window or child.get_parent() != flowbox:
+            return
+        # A tile owns its identity; its position changes when rows are prepended,
+        # evicted, or moved across the detail fold. Never resolve a click by position.
+        model = child._album_model
+        self.emit("cover-clicked", None if model.id == self.currently_selected_id else model.id)
 
     def _on_album_starred(self, _: Any, starred: bool, model: "AlbumsGrid._AlbumModel"):
         # Also on the model, so that a tile rebuilt later (moving between the grids)
@@ -1115,7 +1145,12 @@ class AlbumsGrid(Gtk.Overlay):
             # change. Rebuilding every tile here made the first page appear twice.
             self.reflow_grids(
                 force_reload_from_master=False,
-                selected_index=self.currently_selected_index,
+                selected_index=(
+                    self._pending_reflow[1]
+                    if self._pending_reflow is not None
+                    else self.currently_selected_index
+                ),
+                models=self._pending_reflow[2] if self._pending_reflow is not None else None,
             )
 
     def _on_detail_box_child_revealed(self, revealer: Gtk.Revealer, _):
@@ -1218,7 +1253,7 @@ class AlbumsGrid(Gtk.Overlay):
             halign=Gtk.Align.START,
         )
 
-    def _create_cover_art_widget(self, item: _AlbumModel) -> Gtk.Box:
+    def _create_cover_art_widget(self, item: _AlbumModel) -> Gtk.FlowBoxChild:
         widget_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
         # Cover art image
@@ -1267,7 +1302,11 @@ class AlbumsGrid(Gtk.Overlay):
             )
 
         widget_box.show_all()
-        return widget_box
+        tile = Gtk.FlowBoxChild()
+        tile._album_model = item
+        tile.add(widget_box)
+        tile.show()
+        return tile
 
     def reflow_grids(
         self,
@@ -1312,6 +1351,10 @@ class AlbumsGrid(Gtk.Overlay):
                 self._hold_in_place(ordered[selected_index], until_released=True)
             self._keep_height()
             self.detail_box_revealer.set_reveal_child(False)
+            if not self.detail_box_revealer.get_child_revealed():
+                # With animations disabled (or before first allocation), it may
+                # already be closed: no child-revealed notification will follow.
+                GLib.idle_add(self._run_pending_reflow)
             return
         self._pending_reflow = None
         # Nothing is closing any more (the clicked album now stays in place by itself).
@@ -1321,13 +1364,13 @@ class AlbumsGrid(Gtk.Overlay):
         page_offset = self._window_offset()
 
         # Calculate the look-at window.
-        if models:
+        if models is not None:
             window = self._window(models)
         else:
             window = list(self.list_store_top) + list(self.list_store_bottom)
 
         # Determine where the cuttoff is between the top and bottom grids.
-        entries_before_fold = self._window_size()
+        entries_before_fold = len(window)
         if selected_index is not None and self.items_per_row:
             relative_selected_index = selected_index - page_offset
             entries_before_fold = (
@@ -1351,9 +1394,11 @@ class AlbumsGrid(Gtk.Overlay):
                 len(self.list_store_bottom),
                 window[entries_before_fold:],
             )
-        elif selected_index or entries_before_fold != self._window_size():
+        else:
             # This case handles when the selection changes and the entries need to be
-            # re-allocated to the top and bottom grids
+            # re-allocated to the top and bottom grids, including deselection. Leaving
+            # the bottom store populated on close makes the next batch append ahead
+            # of it, corrupting display order and the selected-index lookup.
             # Move entries between the two stores.
             top_store_len = len(self.list_store_top)
             bottom_store_len = len(self.list_store_bottom)
@@ -1377,6 +1422,11 @@ class AlbumsGrid(Gtk.Overlay):
             self.grid_top.select_child(to_select)
 
             if self.currently_selected_index == selected_index:
+                # A pending switch can be cancelled by clicking the original album.
+                # Its details still exist, but the pending reflow started closing them.
+                if not self.detail_box_revealer.get_reveal_child():
+                    self.detail_box_revealer.set_reveal_child(True)
+                    self._scroll_to_detail()
                 return
 
             for c in self.detail_box_inner.get_children():

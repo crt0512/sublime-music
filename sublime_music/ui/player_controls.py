@@ -2,7 +2,7 @@ import copy
 import math
 from datetime import timedelta
 from functools import partial
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import bleach
 from gi.repository import Gdk, GdkPixbuf, GLib, GObject, Gtk, Pango
@@ -32,6 +32,14 @@ def format_and_bit_rate(song: Song) -> str:
 
 
 SCALE_THUMB_CLICK_TOLERANCE_PX = 12
+
+
+class _SongScrubber(Gtk.Scale):
+    """Use the original roomy width when available, but still fit split windows."""
+
+    def do_get_preferred_width(self) -> Tuple[int, int]:
+        minimum, natural = Gtk.Scale.do_get_preferred_width(self)
+        return minimum, max(natural, 400)
 
 
 class PlayerControls(Gtk.ActionBar):
@@ -90,7 +98,11 @@ class PlayerControls(Gtk.ActionBar):
         self.last_device_list_update = None
 
         self.pack_start(song_display)
-        self.set_center_widget(playback_controls)
+        # A center widget gets its natural width before the sides, starving song
+        # metadata in narrow windows. Share the row instead, with readable labels
+        # reserved first and the seek bar expanding into the remaining space.
+        playback_controls.set_hexpand(True)
+        self.pack_start(playback_controls)
         self.pack_end(rating_play_queue_volume)
 
     connecting_to_device_token = 0
@@ -634,14 +646,11 @@ class PlayerControls(Gtk.ActionBar):
     def on_play_queue_button_press(self, tree: Any, event: Gdk.EventButton) -> bool:
         if event.button == 3:  # Right click
             clicked_path = tree.get_path_at_pos(event.x, event.y)
+            if clicked_path is None:
+                return False
 
             store, paths = tree.get_selection().get_selected_rows()
             allow_deselect = False
-
-            def on_download_state_change(song_id: str):
-                # Refresh the entire window (no force) because the song could
-                # be in a list anywhere in the window.
-                GLib.idle_add(lambda: self.emit("refresh-window", {}, False))
 
             # Use the new selection instead of the old one for calculating what
             # to do the right click on.
@@ -649,30 +658,51 @@ class PlayerControls(Gtk.ActionBar):
                 paths = [clicked_path[0]]
                 allow_deselect = True
 
-            song_ids = [self.play_queue_store[p][-1] for p in paths]
-
-            remove_text = "Remove " + util.pluralize("song", len(song_ids)) + " from queue"
-
-            def on_remove_songs_click(_: Any):
-                self.emit("songs-removed", [p.get_indices()[0] for p in paths])
-
-            util.show_song_popover(
-                song_ids,
-                event.x,
-                event.y,
-                tree,
-                self.offline_mode,
-                on_download_state_change=on_download_state_change,
-                extra_menu_items=[
-                    (Gtk.ModelButton(text=remove_text), on_remove_songs_click),
-                ],
-            )
+            self._show_queue_song_popover(tree, event, [p.get_indices()[0] for p in paths])
 
             # If the click was on a selected row, don't deselect anything.
             if not allow_deselect:
                 return True
 
         return False
+
+    def on_song_title_button_press(self, widget: Gtk.Widget, event: Gdk.EventButton) -> bool:
+        index = self.current_playing_index
+        if (
+            event.button != 3
+            or self.info_song is None
+            or index is None
+            or not 0 <= index < len(self.play_queue_store)
+        ):
+            return False
+
+        self._show_queue_song_popover(widget, event, [index])
+        return True
+
+    def _show_queue_song_popover(
+        self, widget: Gtk.Widget, event: Gdk.EventButton, indices: List[int]
+    ):
+        song_ids = [self.play_queue_store[index][-1] for index in indices]
+
+        def on_download_state_change(song_id: str):
+            # The song could be in a list anywhere in the window.
+            GLib.idle_add(lambda: self.emit("refresh-window", {}, False))
+
+        def on_remove_songs_click(_: Any):
+            self.emit("songs-removed", indices)
+
+        remove_text = "Remove " + util.pluralize("song", len(song_ids)) + " from queue"
+        util.show_song_popover(
+            song_ids,
+            event.x,
+            event.y,
+            widget,
+            self.offline_mode,
+            on_download_state_change=on_download_state_change,
+            extra_menu_items=[
+                (Gtk.ModelButton(text=remove_text), on_remove_songs_click),
+            ],
+        )
 
     def on_play_queue_model_row_move(self, *args):
         # If we are programatically editing the song list, don't do anything.
@@ -717,10 +747,15 @@ class PlayerControls(Gtk.ActionBar):
                 xalign=0,
                 use_markup=True,
                 ellipsize=Pango.EllipsizeMode.END,
+                width_chars=11,
             )
 
         self.song_title = make_label("song-title")
-        details_box.add(self.song_title)
+        title_event_box = Gtk.EventBox(visible_window=False)
+        title_event_box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        title_event_box.connect("button-press-event", self.on_song_title_button_press)
+        title_event_box.add(self.song_title)
+        details_box.add(title_event_box)
 
         # Format and bit rate, e.g. "FLAC  •  1024 kbps".
         self.song_format = make_label("song-format")
@@ -750,8 +785,10 @@ class PlayerControls(Gtk.ActionBar):
         self.song_progress_label.set_name("song-progress-label")
         scrubber_box.pack_start(self.song_progress_label, False, False, 5)
 
-        self.song_scrubber = Gtk.Scale.new_with_range(
-            orientation=Gtk.Orientation.HORIZONTAL, min=0, max=100, step=5
+        self.song_scrubber = _SongScrubber(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            adjustment=Gtk.Adjustment(lower=0, upper=100, step_increment=5, page_increment=50),
+            digits=0,
         )
         self.song_scrubber.set_name("song-scrubber")
         self.song_scrubber.set_draw_value(False)
@@ -768,9 +805,8 @@ class PlayerControls(Gtk.ActionBar):
         self.song_duration_label.set_name("song-duration-label")
         scrubber_box.pack_start(self.song_duration_label, False, False, 5)
 
-        # The action bar centres this whole widget at its natural width, so if the
-        # progress label got wider or narrower as the seconds tick, every control in
-        # here would shift sideways. Keep both time labels as wide as the wider one (the
+        # If the progress label got wider or narrower as the seconds tick, the
+        # controls would shift sideways. Keep both time labels as wide as the wider one (the
         # duration, which only changes with the song). The stylesheet also asks for
         # tabular digits, so that all digits have the same width.
         self._time_label_size_group = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
@@ -867,7 +903,7 @@ class PlayerControls(Gtk.ActionBar):
             icon_size=Gtk.IconSize.LARGE_TOOLBAR,
         )
         self.info_button.connect("clicked", self.on_info_click)
-        box.pack_start(self.info_button, False, True, 5)
+        box.pack_start(self.info_button, False, True, 2)
 
         self.info_popover = Gtk.PopoverMenu(modal=False, name="song-info-popover")
         self.info_popover.set_relative_to(self.info_button)
@@ -891,7 +927,7 @@ class PlayerControls(Gtk.ActionBar):
         )
         self.device_button.get_child().show_all()
         self.device_button.connect("clicked", self.on_device_click)
-        box.pack_start(self.device_button, False, True, 5)
+        box.pack_start(self.device_button, False, True, 2)
 
         self.device_popover = Gtk.PopoverMenu(modal=False, name="device-popover")
         self.device_popover.set_relative_to(self.device_button)
@@ -932,7 +968,7 @@ class PlayerControls(Gtk.ActionBar):
             icon_size=Gtk.IconSize.LARGE_TOOLBAR,
         )
         self.play_queue_button.connect("clicked", self.on_play_queue_click)
-        box.pack_start(self.play_queue_button, False, True, 5)
+        box.pack_start(self.play_queue_button, False, True, 2)
 
         self.play_queue_popover = Gtk.PopoverMenu(modal=False, name="up-next-popover")
         self.play_queue_popover.set_relative_to(self.play_queue_button)

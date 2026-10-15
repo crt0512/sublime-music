@@ -70,6 +70,8 @@ class UIState:
     current_tab: str = "albums"
     selected_album_id: Optional[str] = None
     selected_artist_id: Optional[str] = None
+    artist_filter_text: str = ""
+    artist_sort: str = "name_asc"
     selected_browse_element_id: Optional[str] = None
     selected_playlist_id: Optional[str] = None
     album_sort_direction: str = "ascending"
@@ -120,6 +122,10 @@ class UIState:
 
     def migrate(self):
         # Fields added after this state file was written get their defaults.
+        if "artist_filter_text" not in self.__dict__:
+            self.artist_filter_text = ""
+        if "artist_sort" not in self.__dict__:
+            self.artist_sort = "name_asc"
         if "song_query" not in self.__dict__:
             self.song_query = SongQuery()
         if "song_columns" not in self.__dict__:

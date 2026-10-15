@@ -1241,6 +1241,72 @@ def test_song_library_sync_and_query(cache_adapter: FilesystemAdapter):
         cache_adapter.get_song_library(SongQuery(sort_column="nope"))
 
 
+@pytest.mark.parametrize(
+    "minimum,maximum,ratings",
+    [
+        (None, None, {None, 1, 2, 3, 4, 5}),
+        (3, None, {3, 4, 5}),
+        (None, 2, {None, 1, 2}),
+        (2, 4, {2, 3, 4}),
+        (5, 5, {5}),
+        (0, 0, {None}),
+        (0, 5, {None, 1, 2, 3, 4, 5}),
+    ],
+)
+def test_song_library_rating_bounds(cache_adapter: FilesystemAdapter, minimum, maximum, ratings):
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, _library_songs(12))
+    songs = cache_adapter.get_song_library(SongQuery(min_rating=minimum, max_rating=maximum))
+    assert {song.user_rating for song in songs} == ratings
+    assert len(songs) == 2 * len(ratings)
+
+
+def test_song_library_rating_combines_with_text_and_preset(cache_adapter: FilesystemAdapter):
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, _library_songs(60))
+    songs = cache_adapter.get_song_library(
+        SongQuery(
+            preset=SongQuery.Preset.MOST_PLAYED,
+            filter_column="artist",
+            filter_text="Artist 1",
+            min_rating=3,
+            max_rating=5,
+        )
+    )
+    assert songs
+    assert all(
+        song.artist == "Artist 1" and song.play_count and song.user_rating == 4 for song in songs
+    )
+
+
+@pytest.mark.parametrize("minimum,maximum", [(-1, None), (None, 6), (5, 2)])
+def test_song_library_rejects_invalid_rating_bounds(cache_adapter, minimum, maximum):
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, _library_songs(1))
+    with pytest.raises(ValueError):
+        cache_adapter.get_song_library(SongQuery(min_rating=minimum, max_rating=maximum))
+
+
+def test_song_library_seeded_random_sort(cache_adapter: FilesystemAdapter):
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, _library_songs(60))
+    query = SongQuery(sort_column="random", random_seed=123, min_rating=3)
+    first = [song.id for song in cache_adapter.get_song_library(query)]
+    again = [song.id for song in cache_adapter.get_song_library(query)]
+    other = [
+        song.id
+        for song in cache_adapter.get_song_library(
+            SongQuery(sort_column="random", random_seed=456, min_rating=3)
+        )
+    ]
+    ordered = [song.id for song in cache_adapter.get_song_library(SongQuery(min_rating=3))]
+    assert len(first) == 30
+    assert first == again
+    assert first != other and first != ordered
+    assert set(first) == set(other) == set(ordered)
+
+
+def test_song_library_random_sort_handles_empty_library(cache_adapter: FilesystemAdapter):
+    cache_adapter.ingest_new_data(KEYS.SONGS, None, [])
+    assert cache_adapter.get_song_library(SongQuery(sort_column="random")) == []
+
+
 def test_song_library_resync_keeps_cached_files_and_drops_vanished(
     cache_adapter: FilesystemAdapter,
 ):

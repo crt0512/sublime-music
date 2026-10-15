@@ -1,7 +1,7 @@
 from datetime import timedelta
 from functools import partial
 from random import randint
-from typing import List, Sequence, cast
+from typing import List, Sequence, Tuple, cast
 
 import bleach
 from gi.repository import Gio, GLib, GObject, Gtk, Pango
@@ -31,8 +31,14 @@ class ArtistsPanel(Gtk.Paned):
     def __init__(self, *args, **kwargs):
         Gtk.Paned.__init__(self, orientation=Gtk.Orientation.HORIZONTAL)
 
+        self._last_update_context = None
         self.artist_list = ArtistList()
-        self.pack1(self.artist_list, False, False)
+        self.artist_list.connect(
+            "refresh-window",
+            lambda _, *args: self.emit("refresh-window", *args),
+        )
+        self.pack1(self.artist_list, False, True)
+        self.set_position(200)
 
         self.artist_detail_panel = ArtistDetailPanel()
         self.artist_detail_panel.connect(
@@ -46,7 +52,26 @@ class ArtistsPanel(Gtk.Paned):
         self.pack2(self.artist_detail_panel, True, False)
 
     def update(self, app_config: AppConfiguration, force: bool = False):
-        self.artist_list.update(app_config=app_config)
+        state = app_config.state
+        context = (
+            app_config.current_provider_id,
+            id(state),
+            state.selected_artist_id,
+            state.artist_details_expanded,
+            app_config.offline_mode,
+        )
+        if (
+            not force
+            and self.artist_list._local_controls_update
+            and context == self._last_update_context
+            and state.artist_filter_text == self.artist_list.filter_entry.get_text()
+            and state.artist_sort == self.artist_list.sort_combo.get_active_id()
+        ):
+            # The controls already updated the local list. The queued state-persistence
+            # round-trip must not fetch artists or reload the unchanged detail panel.
+            return
+        self._last_update_context = context
+        self.artist_list.update(app_config=app_config, force=force)
         self.artist_detail_panel.update(app_config=app_config)
 
 
@@ -63,8 +88,20 @@ class _ArtistModel(GObject.GObject):
 
 
 class ArtistList(Gtk.Box):
+    __gsignals__ = {
+        "refresh-window": (
+            GObject.SignalFlags.RUN_FIRST,
+            GObject.TYPE_NONE,
+            (object, bool),
+        ),
+    }
+
     def __init__(self):
         Gtk.Box.__init__(self, orientation=Gtk.Orientation.VERTICAL)
+        self._artists: Sequence[API.Artist] = []
+        self._updating_controls = False
+        self._local_controls_update = False
+        self._controls_change_token = 0
 
         list_actions = Gtk.ActionBar()
 
@@ -73,6 +110,28 @@ class ArtistList(Gtk.Box):
         list_actions.pack_end(self.refresh_button)
 
         self.add(list_actions)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5, margin=5)
+        self.filter_entry = Gtk.SearchEntry(
+            placeholder_text="Filter artists", width_chars=10, max_width_chars=16
+        )
+        self.filter_entry.set_tooltip_text("Filter the loaded artists by name")
+        controls.add(self.filter_entry)
+        self.sort_combo = Gtk.ComboBoxText()
+        for sort_id, label in (
+            ("name_asc", "Name A–Z"),
+            ("name_desc", "Name Z–A"),
+            ("albums_desc", "Albums: most first"),
+            ("albums_asc", "Albums: least first"),
+        ):
+            self.sort_combo.append(sort_id, label)
+        self.sort_combo.set_active_id("name_asc")
+        self.sort_combo.set_tooltip_text("Sort artists")
+        self.sort_combo.get_cells()[0].set_property("ellipsize", Pango.EllipsizeMode.END)
+        controls.add(self.sort_combo)
+        self.pack_start(controls, False, False, 0)
+        self.filter_entry.connect("changed", self._on_controls_changed)
+        self.sort_combo.connect("changed", self._on_controls_changed)
 
         self.error_container = Gtk.Box()
         self.add(self.error_container)
@@ -84,7 +143,7 @@ class ArtistList(Gtk.Box):
         self.loading_indicator.add(spinner_row)
         self.pack_start(self.loading_indicator, False, False, 0)
 
-        list_scroll_window = Gtk.ScrolledWindow(min_content_width=250)
+        list_scroll_window = Gtk.ScrolledWindow(min_content_width=140)
 
         def create_artist_row(model: _ArtistModel) -> Gtk.ListBoxRow:
             label_text = [f"<b>{model.name}</b>"]
@@ -101,6 +160,7 @@ class ArtistList(Gtk.Box):
             row.add(
                 Gtk.Label(
                     label=bleach.clean("\n".join(label_text)),
+                    tooltip_text=model.name,
                     use_markup=True,
                     margin=12,
                     halign=Gtk.Align.START,
@@ -134,6 +194,13 @@ class ArtistList(Gtk.Box):
         if app_config:
             self._app_config = app_config
             self.refresh_button.set_sensitive(not app_config.offline_mode)
+            self._updating_controls = True
+            try:
+                self.filter_entry.set_text(app_config.state.artist_filter_text)
+                if not self.sort_combo.set_active_id(app_config.state.artist_sort):
+                    self.sort_combo.set_active_id("name_asc")
+            finally:
+                self._updating_controls = False
 
         for c in self.error_container.get_children():
             self.error_container.remove(c)
@@ -149,25 +216,65 @@ class ArtistList(Gtk.Box):
         else:
             self.error_container.hide()
 
-        new_store = []
-        selected_idx = None
-        for i, artist in enumerate(artists):
-            if (
-                self._app_config
-                and self._app_config.state
-                and self._app_config.state.selected_artist_id == artist.id
-            ):
-                selected_idx = i
-            new_store.append(_ArtistModel(artist))
-
-        util.diff_model_store(self.artists_store, new_store)
-
-        # Preserve selection
-        if selected_idx is not None:
-            row = self.list.get_row_at_index(selected_idx)
-            self.list.select_row(row)
-
+        self._artists = list(artists)
+        self._apply_controls()
         self.loading_indicator.hide()
+
+    def _apply_controls(self):
+        query = self.filter_entry.get_text().casefold()
+        artists = [artist for artist in self._artists if query in artist.name.casefold()]
+        sort = self.sort_combo.get_active_id()
+
+        def name_key(artist: API.Artist) -> Tuple[str, str, str]:
+            return (artist.name.casefold(), artist.name, artist.id or "")
+
+        if sort in ("albums_desc", "albums_asc"):
+            direction = -1 if sort == "albums_desc" else 1
+            artists.sort(key=lambda a: (direction * (a.album_count or 0), *name_key(a)))
+        else:
+            artists.sort(key=name_key, reverse=sort == "name_desc")
+
+        util.diff_model_store(self.artists_store, [_ArtistModel(a) for a in artists])
+
+        selected_id = self._app_config.state.selected_artist_id if self._app_config else None
+        selected_idx = next(
+            (
+                i
+                for i, artist in enumerate(artists)
+                if selected_id is not None and artist.id == selected_id
+            ),
+            None,
+        )
+        # Filtering only changes the highlight, never navigation or artist details.
+        self.list.unselect_all()
+        if selected_idx is not None:
+            self.list.select_row(self.list.get_row_at_index(selected_idx))
+
+    def _on_controls_changed(self, _):
+        if self._updating_controls:
+            return
+        self._apply_controls()
+        self._controls_change_token += 1
+        token = self._controls_change_token
+        self._local_controls_update = True
+        try:
+            self.emit(
+                "refresh-window",
+                {
+                    "artist_filter_text": self.filter_entry.get_text(),
+                    "artist_sort": self.sort_combo.get_active_id(),
+                },
+                False,
+            )
+        finally:
+            # App.update_window queues its work with idle_add. Clear the marker after
+            # that work, and only for the latest change in a burst of typing.
+            GLib.idle_add(self._finish_local_controls_update, token)
+
+    def _finish_local_controls_update(self, token: int) -> bool:
+        if token == self._controls_change_token:
+            self._local_controls_update = False
+        return False
 
 
 class ArtistDetailPanel(Gtk.Box):
@@ -210,7 +317,7 @@ class ArtistDetailPanel(Gtk.Box):
             spinner_name="artist-artwork-spinner",
             image_size=300,
         )
-        self.big_info_panel.pack_start(self.artist_artwork, False, False, 0)
+        self.big_info_panel.add(self.artist_artwork)
 
         # Action buttons, name, comment, number of songs, etc.
         artist_details_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -225,6 +332,8 @@ class ArtistDetailPanel(Gtk.Box):
 
         self.artist_bio = self.make_label(name="artist-bio", justify=Gtk.Justification.LEFT)
         self.artist_bio.set_line_wrap(True)
+        self.artist_bio.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.artist_bio.set_max_width_chars(45)
         artist_details_box.add(self.artist_bio)
 
         self.similar_artists_scrolledwindow = Gtk.ScrolledWindow()
@@ -239,7 +348,7 @@ class ArtistDetailPanel(Gtk.Box):
 
         artist_details_box.add(self.similar_artists_scrolledwindow)
 
-        self.artist_stats = self.make_label(name="artist-stats")
+        self.artist_stats = self.make_label(name="artist-stats", ellipsize=Pango.EllipsizeMode.END)
         artist_details_box.add(self.artist_stats)
 
         self.play_shuffle_buttons = Gtk.Box(
@@ -257,7 +366,7 @@ class ArtistDetailPanel(Gtk.Box):
             "media-playlist-shuffle-symbolic", label="Shuffle All", relief=True
         )
         self.shuffle_button.connect("clicked", self.on_shuffle_all_button)
-        self.play_shuffle_buttons.pack_start(self.shuffle_button, False, False, 5)
+        self.play_shuffle_buttons.pack_start(self.shuffle_button, False, False, 2)
         artist_details_box.add(self.play_shuffle_buttons)
 
         self.big_info_panel.pack_start(artist_details_box, True, True, 0)
@@ -286,7 +395,8 @@ class ArtistDetailPanel(Gtk.Box):
         expand_button_container.pack_end(self.expand_collapse_button, False, False, 0)
         action_buttons_container.add(expand_button_container)
 
-        self.big_info_panel.pack_start(action_buttons_container, False, False, 5)
+        # Keep actions below the metadata rather than requiring a third column.
+        artist_details_box.add(action_buttons_container)
 
         self.pack_start(self.big_info_panel, False, True, 0)
 

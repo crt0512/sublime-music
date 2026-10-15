@@ -262,6 +262,10 @@ class SongQuery:
       (case-insensitive). ``filter_column`` is one of :attr:`SongQuery.FILTER_COLUMNS`;
       ``"any"`` means title, artist, album artist or album.
     * ``year_range`` (inclusive) only applies to :attr:`SongQuery.Preset.YEAR_RANGE`.
+        * ``min_rating`` and ``max_rating`` are inclusive bounds (``None``: no bound).
+            Unrated songs count as zero.
+        * ``sort_column="random"`` shuffles using ``random_seed``, keeping the order stable
+            until a new seed is chosen.
     """
 
     class Preset(Enum):
@@ -290,6 +294,7 @@ class SongQuery:
         "play_count",
         "user_rating",
         "starred",
+        "random",
     )
     FILTER_COLUMNS: ClassVar[Tuple[str, ...]] = (
         "any",
@@ -306,6 +311,9 @@ class SongQuery:
     filter_text: str = ""
     filter_column: str = "any"
     year_range: Tuple[int, int] = this_decade()
+    min_rating: Optional[int] = None
+    max_rating: Optional[int] = None
+    random_seed: int = 0
 
 
 @dataclass

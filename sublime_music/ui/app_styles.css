@@ -1,4 +1,11 @@
 /* ********** Main ********** */
+#main-header .stack-switcher button {
+  /* Some themes otherwise require 100px per tab, regardless of its label. */
+  min-width: 0;
+  padding-left: 3px;
+  padding-right: 3px;
+}
+
 #connected-to-label {
   margin: 5px 15px;
   font-size: 1.2em;
@@ -160,6 +167,11 @@ entry.invalid {
 }
 
 /* ********** Playback Controls ********** */
+#player-controls-bar button {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
 #player-controls-album-artwork {
   min-height: 70px;
   min-width: 70px;
@@ -181,7 +193,8 @@ entry.invalid {
 }
 
 #player-controls-bar #song-scrubber {
-  min-width: 400px;
+  /* Metadata takes priority; the scale still prefers 400px when there is room. */
+  min-width: 80px;
 }
 
 /* Tabular digits, so the time labels keep their width as the seconds tick (the macOS

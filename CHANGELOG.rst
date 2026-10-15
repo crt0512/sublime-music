@@ -1,3 +1,104 @@
+v0.14.2
+========
+
+Version 0.14.1 was skipped because it proved to be hella unstable lol.
+This release includes all changes since the v0.14.0 "release" commit (``25e4371``).
+
+**Features**
+
+* UPnP / DLNA renderers (network speakers, AV receivers, smart TVs, Kodi,
+  gmediarender...) on the LAN appear alongside Chromecasts in the device menu.
+  Supports playback, pause, seeking, volume, mute, cover art and song metadata.
+
+  * By default, cached songs are served directly from this computer and other songs
+    are relayed from the music server, avoiding HTTPS and connectivity problems on
+    picky renderers. "Stream Songs Through This Computer" in Settings > UPnP / DLNA
+    switches between this and direct streaming from the music server.
+  * Unsupported song formats can be transcoded to MP3: the music server is asked
+    first, with local ``ffmpeg`` transcoding as a fallback when it is installed.
+  * UPnP discovery and its LAN server can be disabled independently of Chromecast
+    support in Settings > Devices. The device button is hidden when both are off.
+
+* Songs tab:
+
+  * Inclusive minimum/maximum rating filters, combinable with text filters and
+    presets. Unrated songs count as zero; "Any" leaves a bound unrestricted.
+  * "Randomize song order" shuffles the filtered results. The order stays stable
+    during ordinary refreshes and across restarts until randomized again; clicking
+    a column header returns to normal sorting.
+
+* Artists tab: case-insensitive name filtering and sorting by name (A-Z or Z-A) or
+  album count (most or least first). Filtering and sorting work locally without
+  fetching the artist list again, preserve navigation, and are saved across restarts.
+* The "Add song(s) to playlist" menu is searchable and scrollable, with a height
+  that fits the window. Typing filters playlist names, Enter chooses the first match,
+  and an empty result shows "No matching playlists".
+* Right-clicking the currently playing title in the player bar opens the same song
+  menu as the play queue, including "Remove song from queue".
+* The window remembers its size and maximized state, and restores within the current
+  monitor's work area when moving to a smaller screen.
+* Narrower header/player controls and separate filter/pagination rows allow
+  split-screen windows at high display scaling. Hidden tabs no longer impose their
+  minimum width on the active tab, and focusing search no longer forces a wider window.
+
+  * Song title, album and artist information take priority over seek-bar width.
+    The seek bar shrinks in narrow windows and expands to its normal preferred
+    width when space allows.
+  * In narrow windows, global search shrinks and shows "Search..." instead of
+    "Search everything...". Wider windows restore the full label and normal search
+    sizing, without clearing the query or running it again.
+  * Playlists and Artists sidebars start at 200px and can be dragged narrower
+    (about 160px, depending on the theme). Long names ellipsize, with full names
+    available in tooltips. Playlist creation and artist filtering still fit.
+
+**Bug Fixes**
+
+* Fixed Albums "All" mode opening an album a batch away after scrolling and closing
+  details. Closing now merges the two grids; tile activation uses album identity, and
+  batch eviction commits its offsets before notifying selection changes.
+* Fixed album scroll-position jumps when batches are dropped, selection of the first
+  album in descending order, and pending album switches being lost or getting stuck
+  during resizing or with animations disabled.
+* Fixed the Playlists and Artists tabs forcing a half-width window wider once artwork
+  loads. Detail actions now sit below the metadata rather than requiring a third
+  horizontal column; artist biographies also wrap long unbroken text.
+* Fixed drag-and-drop song reordering in the play queue and playlists on macOS 11
+  and later, using a drag target that survives GDK's MIME-type handling.
+* Song-rating completion and playlist-menu callbacks now update GTK on the main
+  thread rather than executor threads.
+* Settings and UI state are saved atomically, so an interrupted save does not leave
+  a truncated configuration or state file. Automatic saves run every 30 seconds.
+* macOS Cmd+Q, Dock Quit and logout now use the normal shutdown path that saves
+  settings and the play queue. SIGTERM also triggers an orderly shutdown.
+* Chromecast and UPnP LAN servers use a free port chosen by the OS instead of a fixed
+  port, avoiding conflicts. The obsolete "LAN Server Port Number" setting is removed
+  from existing configurations automatically.
+* LAN streaming supports HTTP HEAD and byte-range requests, uses HTTP/1.1 and DLNA
+  metadata for strict renderers, and selects the local address reachable by the
+  playback device rather than assuming the default network route is appropriate.
+* Chromecast local-file support is offered only while its LAN server is running;
+  disabling local-file serving stops the server.
+
+**Packaging and Documentation**
+
+* ``ffmpeg`` is now recommended by Debian packages for local UPnP transcoding.
+  UPnP discovery and control use SSDP and SOAP directly, without a new Python dependency.
+* macOS packages use a dedicated application icon, rendered at all required sizes,
+  and the local-network permission description now includes UPnP / DLNA discovery.
+* Updated the README, screenshots link, feature overview and LAN playback settings
+  documentation.
+
+**Tests**
+
+* Added UPnP discovery/playback and LAN serving/relay/transcoding tests, plus
+  configuration-migration and player-manager coverage.
+* Added regression tests for song rating/random filters, artist search/sorting,
+  current-song context menus, narrow layouts, and album batch loading/selection,
+  including discrete wheel scrolling, descending order and disabled animations.
+* Added populated wide/narrow/wide resize tests for readable song metadata and
+  compact search, plus loaded-artwork tab switching, sidebar dragging, long names
+  and playlist creation in half-width windows.
+
 v0.14.0
 =======
 
@@ -61,25 +162,6 @@ Playing integration and the appearance check (bundled into the app, and installe
   shows how many.
 * Chromecast support can be switched off completely in Settings > Devices (no device
   discovery, no LAN server, no device button).
-* UPnP / DLNA renderers (network speakers, AV receivers, smart TVs, Kodi, gmediarender...)
-  on the LAN show up in the device popover next to Chromecasts and can be played on:
-  play/pause, seek, volume and mute, cover art and metadata on the renderer. By
-  default the renderer gets every song from this computer (cached songs directly, the
-  rest relayed from the music server), because renderers are unpredictable about what
-  they will fetch themselves (a Sonos Play:3 refused a FLAC over HTTPS); "Stream Songs
-  Through This Computer" in Settings > UPnP / DLNA turns that off. Songs in a format the
-  renderer doesn't list as playable (a Samsung TV plays nothing but MP3 over DLNA) are
-  transcoded to one it lists: the music server is asked to, and if it doesn't, ``ffmpeg``
-  does it here (so it is now a recommended dependency). Streams are delivered the way
-  strict DLNA devices expect them (HTTP/1.1, DLNA profile names, a file extension in
-  the URL, a known length). Renderers are controlled with SSDP and SOAP directly, so no
-  new dependencies. Like Chromecast support, it can be switched off in Settings >
-  Devices.
-* The LAN file servers (Chromecast and UPnP) listen on a free port picked by the OS
-  instead of a configured one, so a port that is already taken can't break them; the
-  "LAN Server Port Number" setting is gone. They also answer HEAD and Range requests
-  now, which renderers need for seeking, and advertise the address of the network the
-  device is actually on (not a VPN that happens to be the default route).
 * The "resume the play queue?" prompt hides itself after 5 seconds (configurable in
   Settings > Play Queue, 0 = never).
 * The search popover is only as tall as its results, shows a hint before searching and

@@ -13,6 +13,32 @@ from ..ui import albums, artists, browse, player_controls, playlists, songs, uti
 from ..ui.common import DigitsEntry, IconButton, IconMenuButton, SpinnerImage
 
 
+class _SearchEntry(Gtk.SearchEntry):
+    """Prefer the expanded search width without making it a minimum window width."""
+
+    natural_width: int = 0
+    compact: bool = False
+
+    def do_get_preferred_width(self) -> Tuple[int, int]:
+        minimum, natural = Gtk.SearchEntry.do_get_preferred_width(self)
+        if self.compact:
+            return min(minimum, 90), min(natural, 90)
+        # Keep GTK's original theme-dependent natural width, not a character-count
+        # approximation, while allowing the header to squeeze the entry when needed.
+        return min(minimum, 120), max(natural, self.natural_width)
+
+    def set_natural_width(self, width: int):
+        self.natural_width = width
+        self.queue_resize()
+
+    def set_compact(self, compact: bool):
+        if self.compact == compact:
+            return
+        self.compact = compact
+        self.set_placeholder_text("Search..." if compact else "Search everything...")
+        self.queue_resize()
+
+
 class MainWindow(Gtk.ApplicationWindow):
     """Defines the main window for Sublime Music."""
 
@@ -104,6 +130,19 @@ class MainWindow(Gtk.ApplicationWindow):
         self.add(flowbox)
 
         self.connect("button-release-event", self._on_button_release)
+        self.connect("size-allocate", self._on_size_allocate)
+
+    def _on_size_allocate(self, _: Gtk.Widget, allocation: Gdk.Rectangle):
+        # Budget for the expanded search independently of its current compact/focus
+        # state, so resizing or focusing it cannot toggle the layout back and forth.
+        entry_minimum = self.search_entry.get_preferred_width().minimum_width
+        _, original_width = Gtk.SearchEntry.do_get_preferred_width(self.search_entry)
+        full_header_width = (
+            self.titlebar.get_preferred_width().minimum_width
+            - entry_minimum
+            + max(original_width, self.SEARCH_ENTRY_WIDTH)
+        )
+        self.search_entry.set_compact(allocation.width < full_header_width)
 
     current_notification_hash = None
     current_other_providers: Tuple[ProviderConfiguration, ...] = ()
@@ -481,6 +520,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _create_stack(self, **kwargs: Gtk.Widget) -> Gtk.Stack:
         stack = Gtk.Stack()
+        # Hidden panels must not impose their toolbar widths on the active tab.
+        stack.set_hhomogeneous(False)
         for name, child in kwargs.items():
             child.connect(
                 "song-clicked",
@@ -498,11 +539,12 @@ class MainWindow(Gtk.ApplicationWindow):
         Configure the header bar for the window.
         """
         header = Gtk.HeaderBar()
+        header.set_name("main-header")
         header.set_show_close_button(True)
         header.props.title = "Sublime Music"
 
         # Search
-        self.search_entry = Gtk.SearchEntry(placeholder_text="Search everything...")
+        self.search_entry = _SearchEntry(placeholder_text="Search everything...")
         self.search_entry.connect("focus-in-event", self._on_search_entry_focus)
         self.search_entry.connect("button-press-event", self._on_search_entry_button_press)
         self.search_entry.connect("focus-out-event", self._on_search_entry_loose_focus)
@@ -1149,13 +1191,14 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.emit("refresh-window", {"__settings__": changed_settings}, False)
 
-    SEARCH_ENTRY_WIDTH = 300  # while it has focus
-    SEARCH_POPOVER_EXTRA_WIDTH = 50  # how much wider the results are than the entry
+    SEARCH_ENTRY_WIDTH = 300  # preferred focused width; the entry can shrink independently
+    SEARCH_POPOVER_EXTRA_WIDTH = 50  # extra room for result labels
 
     def _show_search(self):
-        self.search_entry.set_size_request(self.SEARCH_ENTRY_WIDTH, -1)
-        # Make the popover's frame exactly as wide as the entry: the results get that
-        # width minus the popover's own padding and border.
+        # Prefer a wider entry while focused, without raising the header's minimum.
+        self.search_entry.set_natural_width(self.SEARCH_ENTRY_WIDTH)
+        # Keep results comfortably wide even when the entry has to shrink: subtract
+        # the popover's own padding and border from the preferred results width.
         style = self.search_popup.get_style_context()
         padding = style.get_padding(style.get_state())
         border = style.get_border(style.get_state())
@@ -1182,7 +1225,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _hide_search(self):
         self.search_popup.popdown()
-        self.search_entry.set_size_request(-1, -1)
+        self.search_entry.set_natural_width(0)
 
     def _set_search_loading(self, loading_state: bool):
         if loading_state:

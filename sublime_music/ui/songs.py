@@ -6,6 +6,7 @@ sortable table. Nothing here ever fetches from the server on its own.
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime
+from random import getrandbits
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from gi.repository import Gdk, GLib, GObject, Gtk, Pango
@@ -213,14 +214,29 @@ class SongsPanel(Gtk.Box):
         self.to_year_spin_button.connect("value-changed", self.on_year_changed)
         self.actionbar.pack_start(self.to_year_spin_button)
 
-        self.filter_entry = Gtk.SearchEntry(placeholder_text="Filter songs")
-        self.filter_entry.set_size_request(220, -1)
+        # Keep the search/rating controls on their own row, so even year filters fit
+        # alongside the other controls in a half-screen window.
+        filter_bar = Gtk.Box(spacing=6, margin=6)
+        self.filter_entry = Gtk.SearchEntry(
+            placeholder_text="Filter songs", width_chars=12, max_width_chars=24
+        )
         self.filter_entry.connect("search-changed", self.on_filter_changed)
-        self.actionbar.pack_start(self.filter_entry)
+        filter_bar.pack_start(self.filter_entry, True, True, 0)
         self.filter_column_combo = self._make_combobox(
             FILTER_COLUMNS, self.on_filter_column_changed
         )
-        self.actionbar.pack_start(self.filter_column_combo)
+        filter_bar.pack_start(self.filter_column_combo, False, False, 0)
+
+        filter_bar.pack_start(Gtk.Label(label="Rating"), False, False, 0)
+        rating_choices = [("any", "Any"), ("0", "Unrated")]
+        rating_choices += [(str(rating), f"{rating} ★") for rating in range(1, 6)]
+        self.min_rating_combo = self._make_combobox(rating_choices, self.on_rating_filter_changed)
+        self.min_rating_combo.set_tooltip_text("Minimum rating (inclusive; unrated = 0)")
+        filter_bar.pack_start(self.min_rating_combo, False, False, 0)
+        filter_bar.pack_start(Gtk.Label(label="to"), False, False, 0)
+        self.max_rating_combo = self._make_combobox(rating_choices, self.on_rating_filter_changed)
+        self.max_rating_combo.set_tooltip_text("Maximum rating (inclusive; unrated = 0)")
+        filter_bar.pack_start(self.max_rating_combo, False, False, 0)
 
         self.column_picker = Gtk.MenuButton(tooltip_text="Choose the columns")
         self.column_picker.add(
@@ -229,22 +245,31 @@ class SongsPanel(Gtk.Box):
         self.column_picker.set_popover(self._make_column_picker())
         self.actionbar.pack_start(self.column_picker)
 
-        self.song_count_label = Gtk.Label(label="")
-        self.actionbar.pack_start(self.song_count_label)
+        self.randomize_button = IconButton(
+            "media-playlist-shuffle-symbolic", "Randomize song order", relief=True
+        )
+        self.randomize_button.connect("clicked", self.on_randomize_clicked)
+        self.actionbar.pack_start(self.randomize_button)
 
         self.sync_button = IconButton(
             "emblem-synchronizing-symbolic", "Sync the song library with the server", relief=True
         )
         self.sync_button.connect("clicked", self.on_sync_clicked)
         self.actionbar.pack_end(self.sync_button)
+        status_bar = Gtk.Box(spacing=12, margin_start=6, margin_end=6, margin_bottom=3)
+        self.song_count_label = Gtk.Label(label="", xalign=0)
+        status_bar.pack_start(self.song_count_label, False, False, 0)
         self.last_synced_label = Gtk.Label(label="")
         self.last_synced_label.get_style_context().add_class("dim-label")
-        self.actionbar.pack_end(self.last_synced_label)
+        status_bar.pack_end(self.last_synced_label, False, False, 0)
         self.spinner = Gtk.Spinner()
         self.actionbar.pack_end(self.spinner)
-        self.progress_label = Gtk.Label(label="")
+        self.progress_label = Gtk.Label(label="", ellipsize=Pango.EllipsizeMode.END)
+        self.progress_label.set_max_width_chars(16)
         self.actionbar.pack_end(self.progress_label)
         self.add(self.actionbar)
+        self.add(filter_bar)
+        self.add(status_bar)
 
         # Content: a message before the first sync, the table, or an error.
         self.content = Gtk.Stack()
@@ -422,6 +447,17 @@ class SongsPanel(Gtk.Box):
         if self.filter_entry.get_text() != query.filter_text:
             self.filter_entry.set_text(query.filter_text)
         self.filter_column_combo.set_active_id(query.filter_column)
+        self.min_rating_combo.set_active_id(
+            "any" if query.min_rating is None else str(query.min_rating)
+        )
+        self.max_rating_combo.set_active_id(
+            "any" if query.max_rating is None else str(query.max_rating)
+        )
+        self.randomize_button.set_tooltip_text(
+            "Randomize again (currently in random order)"
+            if query.sort_column == "random"
+            else "Randomize song order"
+        )
         self._show_sort_indicator()
 
     def _apply_columns(self, names: Optional[List[str]]):
@@ -628,6 +664,26 @@ class SongsPanel(Gtk.Box):
     def on_filter_column_changed(self, combo: Gtk.ComboBox):
         if (column := combo.get_active_id()) and column != self.query.filter_column:
             self._change_query(filter_column=column)
+
+    def on_rating_filter_changed(self, combo: Gtk.ComboBox):
+        if self._updating:
+            return
+        minimum = self.min_rating_combo.get_active_id()
+        maximum = self.max_rating_combo.get_active_id()
+        min_rating = int(minimum) if minimum not in (None, "any") else None
+        max_rating = int(maximum) if maximum not in (None, "any") else None
+        if min_rating is not None and max_rating is not None and min_rating > max_rating:
+            if combo is self.min_rating_combo:
+                max_rating = min_rating
+            else:
+                min_rating = max_rating
+        if (min_rating, max_rating) != (self.query.min_rating, self.query.max_rating):
+            self._change_query(min_rating=min_rating, max_rating=max_rating)
+
+    def on_randomize_clicked(self, _: Gtk.Button):
+        self._change_query(
+            sort_column="random", sort_descending=False, random_seed=getrandbits(63)
+        )
 
     # Columns
     # =========================================================================

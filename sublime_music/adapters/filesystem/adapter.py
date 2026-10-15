@@ -4,6 +4,7 @@ import shutil
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
+from random import Random
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, cast
 
 import peewee
@@ -456,6 +457,21 @@ class FilesystemAdapter(CachingAdapter):
         elif query.preset == Preset.YEAR_RANGE:
             sql = sql.where(Song.year.between(*query.year_range))
 
+        for bound in (query.min_rating, query.max_rating):
+            if bound is not None and not 0 <= bound <= 5:
+                raise ValueError("Rating bounds must be between 0 and 5")
+        if (
+            query.min_rating is not None
+            and query.max_rating is not None
+            and query.min_rating > query.max_rating
+        ):
+            raise ValueError("Minimum rating must not exceed maximum rating")
+        rating = fn.COALESCE(Song.user_rating, 0)
+        if query.min_rating is not None:
+            sql = sql.where(rating >= query.min_rating)
+        if query.max_rating is not None:
+            sql = sql.where(rating <= query.max_rating)
+
         if text := query.filter_text.strip():
             if query.filter_column == "any":
                 sql = sql.where(
@@ -469,22 +485,29 @@ class FilesystemAdapter(CachingAdapter):
             else:
                 raise ValueError(f"Unknown filter column {query.filter_column!r}")
 
-        if query.sort_column not in columns:
+        if query.sort_column not in SongQuery.SORT_COLUMNS:
             raise ValueError(f"Unknown sort column {query.sort_column!r}")
-        primary = columns[query.sort_column]
-        if query.sort_column in text_columns:
+        # Shuffle a deterministic base order so a refresh doesn't reshuffle the songs
+        # under the pointer. Only the Randomize button changes the seed.
+        sort_column = "title" if query.sort_column == "random" else query.sort_column
+        primary = columns[sort_column]
+        if sort_column in text_columns:
             primary = primary.collate("NOCASE")
         sql = sql.order_by(
             # Songs without a value for the sort column always go last.
-            columns[query.sort_column].is_null(),
+            columns[sort_column].is_null(),
             primary.desc() if query.sort_descending else primary.asc(),
             Artist.name.collate("NOCASE"),
             Album.name.collate("NOCASE"),
             Song.disc_number,
             Song.track,
             Song.title.collate("NOCASE"),
+            Song.id,
         )
-        return [self._library_song(row) for row in sql.dicts()]
+        songs = [self._library_song(row) for row in sql.dicts()]
+        if query.sort_column == "random":
+            Random(query.random_seed).shuffle(songs)
+        return songs
 
     def _library_song(self, row: Dict[str, Any]) -> LibrarySong:
         def as_timedelta(value: Any) -> Optional[timedelta]:
