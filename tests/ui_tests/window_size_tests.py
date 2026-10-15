@@ -165,6 +165,38 @@ def test_seekbar_range_and_increments_are_unchanged(window):
     assert adjustment.get_page_increment() == 50
 
 
+def _assert_playback_centered(controls):
+    center = controls.get_allocated_width() / 2
+    playback = controls.get_center_widget()
+    assert playback is not None
+    for widget in (playback, controls.song_scrubber, controls.play_button):
+        x, _ = widget.translate_coordinates(controls, 0, 0)
+        assert abs(x + widget.get_allocated_width() / 2 - center) <= 1
+
+
+@pytest.mark.parametrize("devices", [False, True])
+@pytest.mark.parametrize(
+    "metadata", ["Track", "A much longer song title and album name " * 20], ids=["short", "long"]
+)
+def test_playback_is_centered_with_asymmetric_sides(window, devices, metadata):
+    window.stack.set_visible_child_name("browse")
+    controls = window.player_controls
+    for label in (controls.song_title, controls.album_name, controls.artist_name):
+        label.set_text(metadata)
+    controls.star_button.show()
+    controls.device_button.set_visible(devices)
+    controls.song_progress_label.set_text("1:23")
+    controls.song_duration_label.set_text("1:23:45")
+    window.set_focus(controls.play_button)
+    for width in (1342, 731, 900, 1342):
+        window.resize(width, 756)
+        window.show()
+        _wait_for(
+            lambda: window.get_size().width == width and controls.get_allocated_width() == width
+        )
+        _assert_playback_centered(controls)
+
+
 @pytest.mark.parametrize("devices", [False, True])
 @pytest.mark.parametrize("duration", ["4:56", "1:23:45"])
 def test_populated_player_preserves_song_info_at_half_width(window, devices, duration):
@@ -197,6 +229,7 @@ def test_populated_player_preserves_song_info_at_half_width(window, devices, dur
             )
         )
         assert controls.get_preferred_width().minimum_width <= 720
+        _assert_playback_centered(controls)
         # All three labels remain mapped and usable; long text ellipsizes rather
         # than vanishing, and the seek bar does not overlap the song display.
         for label in labels:

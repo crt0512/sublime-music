@@ -1,3 +1,10 @@
+v0.14.3
+========
+This literally only exists because of this :
+- I forgot to add centering to the seek bar in 0.14.2 ...
+
+lol
+
 v0.14.2
 ========
 

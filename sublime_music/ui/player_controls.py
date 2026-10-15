@@ -97,12 +97,14 @@ class PlayerControls(Gtk.ActionBar):
 
         self.last_device_list_update = None
 
+        # Reserve equal space on both sides, even when their contents differ.
+        # Their minimum widths protect the metadata; the seek bar gives up width
+        # symmetrically instead of shifting playback toward the smaller side.
+        self._side_size_group = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
+        self._side_size_group.add_widget(song_display)
+        self._side_size_group.add_widget(rating_play_queue_volume)
         self.pack_start(song_display)
-        # A center widget gets its natural width before the sides, starving song
-        # metadata in narrow windows. Share the row instead, with readable labels
-        # reserved first and the seek bar expanding into the remaining space.
-        playback_controls.set_hexpand(True)
-        self.pack_start(playback_controls)
+        self.set_center_widget(playback_controls)
         self.pack_end(rating_play_queue_volume)
 
     connecting_to_device_token = 0

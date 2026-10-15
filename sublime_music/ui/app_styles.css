@@ -205,7 +205,8 @@ entry.invalid {
 }
 
 #player-controls-bar #volume-slider {
-  min-width: 90px;
+  /* Allow equal side reservations without widening a half-screen window. */
+  min-width: 70px;
 }
 
 #player-controls-bar #volume-slider value {
