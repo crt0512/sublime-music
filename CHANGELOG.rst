@@ -5,6 +5,10 @@ Unreleased
 
 * The song lists on the Albums and Artists tabs show each song's rating next to its
   duration, if the music server supports ratings.
+* Right-clicking songs offers "Download song to...", which asks for a folder and saves
+  the songs' files into it (copying already-cached songs instead of downloading them
+  again). Files already in the folder are never overwritten. The folder chooser remembers
+  where you last saved to.
 
 v0.14.3
 ========

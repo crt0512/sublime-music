@@ -3,7 +3,7 @@ import json
 import threading
 from pathlib import Path
 from time import sleep
-from typing import Any, Iterator, cast
+from typing import Any, Iterator, List, cast
 from unittest import mock
 
 import pytest
@@ -13,12 +13,14 @@ from sublime_music.adapters import (
     CacheMissError,
     CachingAdapter,
     ConfigurationStore,
+    DownloadProgress,
     Result,
     SearchResult,
+    SongCacheStatus,
     SongQuery,
 )
 from sublime_music.adapters.filesystem import FilesystemAdapter
-from sublime_music.adapters.manager import DownloadError
+from sublime_music.adapters.manager import DownloadError, unique_path
 from sublime_music.adapters.subsonic import SubsonicAdapter, api_objects as SubsonicAPI
 from sublime_music.config import AppConfiguration, ProviderConfiguration
 
@@ -443,3 +445,146 @@ def test_song_download_is_not_checked_for_an_image(adapter_manager: AdapterManag
             "https://subsonic.example.com/rest/stream?id=3", "3"
         ).result()
     assert Path(path).read_bytes() == b"ID3 not an image"
+
+
+def _song_response(**song: Any) -> str:
+    return json.dumps({"subsonic-response": {"status": "ok", "version": "1.15.0", "song": song}})
+
+
+def _cache_song(song_id: str, title: str, path: str, body: bytes, tmp_path: Path):
+    """Puts a song's details and its file in the cache, as if it had been downloaded."""
+    assert AdapterManager._instance and AdapterManager._instance.caching_adapter
+    caching_adapter = AdapterManager._instance.caching_adapter
+    caching_adapter.ingest_new_data(
+        CachingAdapter.CachedDataKey.SONG,
+        song_id,
+        SubsonicAPI.Song(song_id, title=title, path=path, size=len(body)),
+    )
+    buffer_file = tmp_path.joinpath(f"{song_id}.buffer")
+    buffer_file.write_bytes(body)
+    caching_adapter.ingest_new_data(
+        CachingAdapter.CachedDataKey.SONG_FILE, song_id, (path, str(buffer_file), len(body))
+    )
+
+
+def _record_download_progress() -> list:
+    assert AdapterManager._instance
+    progress: list = []
+    AdapterManager._instance.on_song_download_progress = lambda song_id, p: progress.append(
+        (song_id, p.type)
+    )
+    return progress
+
+
+def test_unique_path_numbers_taken_names(tmp_path: Path):
+    assert unique_path(tmp_path, "a.mp3") == tmp_path.joinpath("a.mp3")
+    tmp_path.joinpath("a.mp3").touch()
+    assert unique_path(tmp_path, "a.mp3") == tmp_path.joinpath("a (1).mp3")
+    tmp_path.joinpath("a (1).mp3").touch()
+    assert unique_path(tmp_path, "a.mp3") == tmp_path.joinpath("a (2).mp3")
+    tmp_path.joinpath("noext").touch()
+    assert unique_path(tmp_path, "noext") == tmp_path.joinpath("noext (1)")
+
+
+def test_batch_export_songs_copies_cached_and_downloads_the_rest(
+    adapter_manager: AdapterManager, tmp_path: Path
+):
+    assert AdapterManager._instance
+    _cache_song("tr-1", "One", "A/B/01 One.mp3", b"one", tmp_path)
+    server = cast(SubsonicAdapter, AdapterManager._instance.ground_truth_adapter)
+    server._is_mock = True
+    server._set_mock_data(_song_response(id="tr-2", title="Two", path="A/B/02 Two.mp3", size=3))
+    progress = _record_download_progress()
+    started: List[str] = []
+    completed: List[str] = []
+
+    destination = tmp_path.joinpath("exported")
+    response = _FakeResponse(content_type="audio/mpeg", body=b"two")
+    with mock.patch("sublime_music.adapters.manager.requests.get", return_value=response):
+        export_result = AdapterManager.batch_export_songs(
+            ["tr-1", "tr-2"], destination, started.append, completed.append
+        ).result()
+
+    assert export_result.failed == []
+    assert sorted(export_result.saved) == [
+        destination.joinpath("01 One.mp3"),
+        destination.joinpath("02 Two.mp3"),
+    ]
+    assert destination.joinpath("01 One.mp3").read_bytes() == b"one"
+    assert destination.joinpath("02 Two.mp3").read_bytes() == b"two"
+    assert sorted(destination.iterdir()) == sorted(export_result.saved)  # no .part files
+
+    # The cache is as it was: the cached song is still there, the downloaded one was not
+    # added to it (and its download buffer was cleaned up).
+    assert list(AdapterManager.get_cached_statuses(["tr-1", "tr-2"])) == [
+        SongCacheStatus.CACHED,
+        SongCacheStatus.NOT_CACHED,
+    ]
+    assert list(AdapterManager._instance.download_path.iterdir()) == []
+
+    assert started == ["tr-2"]
+    assert sorted(completed) == ["tr-1", "tr-2"]
+    for song_id in ("tr-1", "tr-2"):
+        assert (song_id, DownloadProgress.Type.QUEUED) in progress
+        assert (song_id, DownloadProgress.Type.DONE) in progress
+    assert not any(t == DownloadProgress.Type.ERROR for _, t in progress)
+
+
+def test_batch_export_songs_offline_only_copies_cached_songs(
+    adapter_manager: AdapterManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    assert AdapterManager._instance and AdapterManager._instance.caching_adapter
+    _cache_song("tr-1", "One", "A/B/01 One.mp3", b"one", tmp_path)
+    AdapterManager._instance.caching_adapter.ingest_new_data(
+        CachingAdapter.CachedDataKey.SONG, "tr-2", SubsonicAPI.Song("tr-2", title="Two")
+    )
+    monkeypatch.setattr(AdapterManager, "_offline_mode", True)
+    progress = _record_download_progress()
+
+    destination = tmp_path.joinpath("exported")
+    export_result = AdapterManager.batch_export_songs(["tr-1", "tr-2"], destination).result()
+
+    assert export_result.saved == [destination.joinpath("01 One.mp3")]
+    assert [(title, str(e)) for title, e in export_result.failed] == [
+        ("Two", "the song is not downloaded, and offline mode is on")
+    ]
+    assert ("tr-2", DownloadProgress.Type.ERROR) in progress
+    assert [p.name for p in destination.iterdir()] == ["01 One.mp3"]
+
+
+def test_batch_export_songs_never_overwrites(adapter_manager: AdapterManager, tmp_path: Path):
+    _cache_song("tr-1", "One", "A/B/01 One.mp3", b"one", tmp_path)
+    destination = tmp_path.joinpath("exported")
+    destination.mkdir()
+    destination.joinpath("01 One.mp3").write_bytes(b"older")
+
+    first = AdapterManager.batch_export_songs(["tr-1"], destination).result()
+    second = AdapterManager.batch_export_songs(["tr-1"], destination).result()
+
+    assert first.saved == [destination.joinpath("01 One (1).mp3")]
+    assert second.saved == [destination.joinpath("01 One (2).mp3")]
+    assert destination.joinpath("01 One.mp3").read_bytes() == b"older"
+    assert destination.joinpath("01 One (2).mp3").read_bytes() == b"one"
+
+
+def test_batch_export_songs_reports_a_failed_download(
+    adapter_manager: AdapterManager, tmp_path: Path
+):
+    assert AdapterManager._instance
+    server = cast(SubsonicAdapter, AdapterManager._instance.ground_truth_adapter)
+    server._is_mock = True
+    server._set_mock_data(_song_response(id="tr-2", title="Two", path="A/B/02 Two.mp3", size=3))
+    progress = _record_download_progress()
+
+    destination = tmp_path.joinpath("exported")
+    response = _FakeResponse(502, "text/html; charset=utf-8", b"<html>Bad Gateway</html>")
+    with mock.patch("sublime_music.adapters.manager.requests.get", return_value=response):
+        export_result = AdapterManager.batch_export_songs(["tr-2"], destination).result()
+
+    assert export_result.saved == []
+    assert [(title, type(e)) for title, e in export_result.failed] == [("Two", DownloadError)]
+    assert "HTTP 502" in str(export_result.failed[0][1])
+    assert ("tr-2", DownloadProgress.Type.ERROR) in progress
+    # Nothing half-done is left anywhere.
+    assert list(destination.iterdir()) == []
+    assert list(AdapterManager._instance.download_path.iterdir()) == []

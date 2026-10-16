@@ -3,10 +3,12 @@ import itertools
 import logging
 import os
 import random
+import re
+import shutil
 import tempfile
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from functools import partial
@@ -238,6 +240,77 @@ class Result(Generic[T]):
         :class:`GLib.idle_add` call.
         """
         return self._data is not None
+
+
+def export_filename(song: Song) -> str:
+    r"""
+    The name to save ``song``'s file under outside the cache ("Download to..."): the
+    file name the server has it under, or else one built from its metadata.
+
+    >>> from types import SimpleNamespace
+    >>> defaults = dict(id="1", path=None, title="", track=None, suffix=None)
+    >>> def song(**fields):
+    ...     return SimpleNamespace(**{**defaults, **fields})
+    >>> export_filename(song(path="ABBA/Arrival/05 Dancing Queen.mp3", title="Dancing Queen"))
+    '05 Dancing Queen.mp3'
+    >>> export_filename(song(path="ABBA\\Arrival\\05 Dancing Queen.mp3"))
+    '05 Dancing Queen.mp3'
+    >>> export_filename(song(title="Thunderstruck", track=4, suffix="flac"))
+    '04 - Thunderstruck.flac'
+    >>> export_filename(song(title="AC/DC Live"))
+    'AC_DC Live'
+    >>> export_filename(song(path="songs/.."))
+    '1'
+    """
+    name = re.split(r"[\\/]", song.path)[-1] if song.path else ""
+    if not name:
+        name = song.title or ""
+        if song.track:
+            name = f"{song.track:02} - {name}"
+        if song.suffix:
+            name = f"{name}.{song.suffix}"
+    name = re.sub(r"[\\/\0]", "_", name).strip()
+    return song.id if name in ("", ".", "..") else name
+
+
+def unique_path(directory: Path, filename: str) -> Path:
+    """
+    ``filename`` inside ``directory``, numbered like a browser numbers its downloads
+    ("x (1).mp3", "x (2).mp3"...) when a file of that name is already there.
+    """
+    path = directory.joinpath(filename)
+    stem, suffix = Path(filename).stem, Path(filename).suffix
+    n = 0
+    while path.exists():
+        n += 1
+        path = directory.joinpath(f"{stem} ({n}){suffix}")
+    return path
+
+
+def _place_file(source: Path, destination: Path, move: bool):
+    """
+    Puts ``source`` at ``destination`` (moving or copying it) by way of a ``.part`` file,
+    so that a failure half way never leaves behind what looks like a complete song.
+    """
+    partial = destination.with_name(destination.name + ".part")
+    try:
+        if move:
+            shutil.move(str(source), str(partial))
+        else:
+            shutil.copyfile(str(source), str(partial))
+        os.replace(partial, destination)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+
+
+@dataclass
+class SongExportResult:
+    """What became of a "Download to..." batch: see :meth:`AdapterManager.batch_export_songs`."""
+
+    saved: List[Path] = field(default_factory=list)
+    # (song title, why) for each song that could not be saved.
+    failed: List[Tuple[str, Exception]] = field(default_factory=list)
 
 
 @dataclass
@@ -1227,6 +1300,140 @@ class AdapterManager:
             if AdapterManager._song_download_jobs.get(song_id):
                 AdapterManager._song_download_jobs[song_id].cancel()
                 del AdapterManager._song_download_jobs[song_id]
+
+    @staticmethod
+    def batch_export_songs(
+        song_ids: Sequence[str],
+        directory: Path,
+        before_download: Callable[[str], None] = lambda _: None,
+        on_song_download_complete: Callable[[str], None] = lambda _: None,
+    ) -> Result[SongExportResult]:
+        """
+        Saves the songs' files into ``directory`` ("Download to..."), leaving the cache
+        as it is: a song which is already cached is copied from there, any other one is
+        downloaded. Downloads show up in the downloads menu like any other, and can be
+        cancelled from there. Songs whose name is already taken in the directory get a
+        numbered name rather than overwriting the file.
+
+        Resolves, once every song has been dealt with, to what was saved and what could
+        not be (cancelled songs are in neither list).
+        """
+        assert AdapterManager._instance
+        song_ids = list(song_ids)
+        cancelled = False
+        export_result = SongExportResult()
+        # Released once per song, whatever became of it.
+        songs_done = threading.Semaphore(0)
+        AdapterManager._cancelled_song_ids -= set(song_ids)
+
+        def report(song_id: str, progress_type: DownloadProgress.Type, **kwargs):
+            assert AdapterManager._instance
+            AdapterManager._instance.song_download_progress(
+                song_id, DownloadProgress(progress_type, **kwargs)
+            )
+
+        def do_export_song(song_id: str):
+            assert AdapterManager._instance
+            instance = AdapterManager._instance
+            if (
+                AdapterManager.is_shutting_down
+                or cancelled
+                or song_id in AdapterManager._cancelled_song_ids
+            ):
+                instance.download_limiter_semaphore.release()
+                report(song_id, DownloadProgress.Type.CANCELLED)
+                songs_done.release()
+                return
+
+            song: Optional[Song] = None
+            # A fresh download is moved into place, a cached file is copied.
+            move = False
+
+            def fail(e: Exception):
+                logging.warning(f"Could not save song {song_id} to {directory}: {e}")
+                export_result.failed.append((song.title if song else song_id, e))
+                report(song_id, DownloadProgress.Type.ERROR, exception=e)
+
+            def finish(f: Result[str]):
+                assert AdapterManager._instance
+                AdapterManager._instance.download_limiter_semaphore.release()
+                try:
+                    if cancelled or song_id in AdapterManager._cancelled_song_ids:
+                        # The download reported the cancellation itself.
+                        return
+                    if (exception := f.exception()) is not None:
+                        raise exception
+                    assert song
+                    destination = unique_path(directory, export_filename(song))
+                    _place_file(Path(f.result()), destination, move)
+                    export_result.saved.append(destination)
+                    report(song_id, DownloadProgress.Type.DONE)
+                except Exception as e:
+                    fail(e)
+                finally:
+                    if AdapterManager._song_download_jobs.get(song_id) is f:
+                        del AdapterManager._song_download_jobs[song_id]
+                    on_song_download_complete(song_id)
+                    songs_done.release()
+
+            try:
+                song = AdapterManager.get_song_details(song_id).result()
+                try:
+                    uri: Optional[str] = AdapterManager.get_song_file_uri(song)
+                except CacheMissError:
+                    uri = None
+
+                ground_truth_adapter = instance.ground_truth_adapter
+                source_result: Result[str]
+                if uri is not None:
+                    source_result = Result(uri[7:] if uri.startswith("file://") else uri)
+                elif not ground_truth_adapter.is_networked:
+                    raise Exception("the song's file is missing")
+                elif AdapterManager._offline_mode:
+                    raise Exception("the song is not downloaded, and offline mode is on")
+                else:
+                    move = True
+                    source_result = AdapterManager._create_download_result(
+                        ground_truth_adapter.get_song_file_uri(
+                            song_id, AdapterManager._get_networked_scheme()
+                        ),
+                        song_id,
+                        lambda: before_download(song_id),
+                        expected_size=song.size,
+                    )
+                    AdapterManager._song_download_jobs[song_id] = source_result
+            except Exception as e:
+                instance.download_limiter_semaphore.release()
+                fail(e)
+                on_song_download_complete(song_id)
+                songs_done.release()
+                return
+
+            source_result.add_done_callback(finish)
+
+        def do_batch_export_songs() -> SongExportResult:
+            assert AdapterManager._instance
+            directory.mkdir(parents=True, exist_ok=True)
+
+            # Alert the UI that the downloads are queued.
+            for song_id in song_ids:
+                report(song_id, DownloadProgress.Type.QUEUED)
+
+            for song_id in song_ids:
+                # Only allow a certain number of songs to be downloaded simultaneously.
+                AdapterManager._instance.download_limiter_semaphore.acquire()
+                do_export_song(song_id)
+
+            for _ in song_ids:
+                songs_done.acquire()
+            return export_result
+
+        def on_cancel():
+            nonlocal cancelled
+            cancelled = True
+            AdapterManager.cancel_download_songs(song_ids)
+
+        return Result(do_batch_export_songs, is_download=True, on_cancel=on_cancel)
 
     @staticmethod
     def batch_permanently_cache_songs(

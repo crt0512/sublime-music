@@ -60,12 +60,14 @@ def test_json_load_unload(config_filename: Path, tmp_path: Path):
         filename=config_filename,
     )
     original_config.cache_location = tmp_path
+    original_config.download_to_directory = tmp_path.joinpath("Music")
 
     original_config.save()
 
     loaded_config = AppConfiguration.load_from_file(config_filename)
 
     assert original_config.version == loaded_config.version
+    assert loaded_config.download_to_directory == tmp_path.joinpath("Music")
     assert original_config.providers == loaded_config.providers
     assert original_config.provider == loaded_config.provider
     assert original_config.provider and loaded_config.provider

@@ -13,8 +13,8 @@ from .ui.state import UIState
 
 
 # JSON decoder and encoder translations
-def encode_path(path: Path) -> str:
-    return str(path.resolve())
+def encode_path(path: Optional[Path]) -> Optional[str]:
+    return str(path.resolve()) if path else None
 
 
 dataclasses_json.cfg.global_config.decoders[Path] = Path
@@ -159,6 +159,8 @@ class AppConfiguration(DataClassJsonMixin):
     download_on_stream: bool = True  # also download when streaming a song
     prefetch_amount: int = 3
     concurrent_download_limit: int = 5
+    # Where "Download to..." last saved songs; its folder chooser starts there.
+    download_to_directory: Optional[Path] = None
 
     # Play queue settings: ask before a double-click replaces a play queue which is longer
     # than ``queue_replacement_warning_size`` songs.

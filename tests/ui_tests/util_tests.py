@@ -1,12 +1,16 @@
-from typing import List, Tuple
+from concurrent.futures import Future
+from types import SimpleNamespace
+from typing import Any, Callable, Dict, List, Tuple
 
 import gi
+import pytest
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 
 from gi.repository import Gio, GObject, Gtk  # noqa: E402
 
+from sublime_music.adapters import Result, SongCacheStatus  # noqa: E402
 from sublime_music.ui import util  # noqa: E402
 
 
@@ -131,3 +135,84 @@ def test_diff_song_store_from_empty_and_to_empty():
 
     util.diff_song_store(store, [])
     assert _song_rows(store) == []
+
+
+@pytest.fixture
+def popovers(monkeypatch: pytest.MonkeyPatch) -> List[Gtk.PopoverMenu]:
+    """Every popover menu that ``show_song_popover`` creates while the test runs."""
+    created: List[Gtk.PopoverMenu] = []
+
+    class RecordingPopoverMenu(Gtk.PopoverMenu):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+    monkeypatch.setattr(util.Gtk, "PopoverMenu", RecordingPopoverMenu)
+    return created
+
+
+def _show_song_popover(
+    monkeypatch: pytest.MonkeyPatch,
+    popovers: List[Gtk.PopoverMenu],
+    offline: bool,
+    status: SongCacheStatus,
+) -> Dict[str, Gtk.ModelButton]:
+    def submit(fn: Callable, *args: Any) -> Future:
+        # Complete immediately (the real executors may have been shut down by other tests).
+        future: Future = Future()
+        future.set_result(fn(*args))
+        return future
+
+    monkeypatch.setattr(util.AdapterManager, "executor", SimpleNamespace(submit=submit))
+    song = SimpleNamespace(id="s1", parent_id=None, album=None, artist=None)
+    monkeypatch.setattr(util.AdapterManager, "get_song_details", lambda _: Result(song))
+    monkeypatch.setattr(
+        util.AdapterManager, "get_cached_statuses", lambda ids: [status] * len(ids)
+    )
+    monkeypatch.setattr(util.AdapterManager, "get_playlists", lambda: Result([]))
+
+    window = Gtk.OffscreenWindow()
+    label = Gtk.Label(label="song")
+    window.add(label)
+    window.show_all()
+    util.show_song_popover(["s1"], 0, 0, label, offline)
+    # The song details arrive through the main loop.
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    (popover,) = popovers
+    main_menu = popover.get_children()[0]
+    return {
+        b.get_property("text"): b
+        for b in main_menu.get_children()
+        if isinstance(b, Gtk.ModelButton)
+    }
+
+
+@pytest.mark.parametrize(
+    "offline, status, offered",
+    [
+        (False, SongCacheStatus.NOT_CACHED, True),
+        (False, SongCacheStatus.CACHED, True),
+        # Offline, only a song whose file is in the cache can be saved somewhere.
+        (True, SongCacheStatus.CACHED, True),
+        (True, SongCacheStatus.PERMANENTLY_CACHED, True),
+        (True, SongCacheStatus.NOT_CACHED, False),
+        (True, SongCacheStatus.DOWNLOADING, False),
+    ],
+)
+def test_song_popover_offers_download_to(
+    monkeypatch: pytest.MonkeyPatch,
+    popovers: List[Gtk.PopoverMenu],
+    offline: bool,
+    status: SongCacheStatus,
+    offered: bool,
+):
+    buttons = _show_song_popover(monkeypatch, popovers, offline, status)
+    button = buttons["Download song to..."]
+    if offered:
+        assert button.get_action_name() == "app.download-to"
+        assert button.get_action_target_value().unpack() == ["s1"]
+    else:
+        assert button.get_action_name() is None
+        assert not button.get_sensitive()

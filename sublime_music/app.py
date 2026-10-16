@@ -51,6 +51,7 @@ from .adapters import (
     DownloadProgress,
     Result,
     SongCacheStatus,
+    SongExportResult,
 )
 from .adapters.api_objects import Playlist, PlayQueue, Song
 from .config import AppConfiguration, ProviderConfiguration
@@ -200,6 +201,7 @@ class SublimeMusicApp(Gtk.Application):
         add_action("go-to-album", self.on_go_to_album, parameter_type="s")
         add_action("go-to-artist", self.on_go_to_artist, parameter_type="s")
         add_action("browse-to", self.browse_to, parameter_type="s")
+        add_action("download-to", self.on_download_to, parameter_type="as")
         add_action("go-to-playlist", self.on_go_to_playlist, parameter_type="s")
 
         add_action("go-online", self.on_go_online)
@@ -929,6 +931,73 @@ class SublimeMusicApp(Gtk.Application):
         self.app_config.state.play_queue += tuple(song_ids)
         self.app_config.state.old_play_queue += tuple(song_ids)
         self.update_window()
+
+    def on_download_to(self, action: Any, song_ids: GLib.Variant):
+        """
+        Right click > "Download song to...": asks for a folder and saves the songs' files
+        into it (see :meth:`AdapterManager.batch_export_songs`).
+        """
+        song_ids = list(song_ids)
+        songs = util.pluralize("song", len(song_ids))
+        chooser = Gtk.FileChooserNative.new(
+            f"Download {songs} to...",
+            self.window,
+            Gtk.FileChooserAction.SELECT_FOLDER,
+            "_Download",
+            "_Cancel",
+        )
+        if (last := self.app_config.download_to_directory) and last.is_dir():
+            chooser.set_current_folder(str(last))
+        response = chooser.run()
+        folder = chooser.get_filename()
+        chooser.destroy()
+        if response != Gtk.ResponseType.ACCEPT or not folder:
+            return
+
+        directory = Path(folder)
+        self.app_config.download_to_directory = directory
+        self.app_config.save()
+
+        def notify(markup: str, icon: str, *actions: Tuple[str, Callable[[], None]]):
+            self.app_config.state.current_notification = UIState.UINotification(
+                markup=markup, icon=icon, actions=actions
+            )
+            self.update_window()
+
+        def open_folder():
+            Gtk.show_uri_on_window(self.window, directory.as_uri(), Gdk.CURRENT_TIME)
+
+        def on_done(f: Result[SongExportResult]):
+            where = GLib.markup_escape_text(str(directory))
+            if (exception := f.exception()) is not None:
+                why = GLib.markup_escape_text(str(exception))
+                notify(f"<b>Could not download {songs} to {where}.</b> {why}", "dialog-error")
+                return
+
+            export_result = f.result()
+            saved, failed = len(export_result.saved), len(export_result.failed)
+            if failed:
+                why = "; ".join(
+                    f"{GLib.markup_escape_text(title)}: {GLib.markup_escape_text(str(e))}"
+                    for title, e in export_result.failed
+                )
+                markup = (
+                    f"<b>{failed} of {len(song_ids)} {songs} could not be downloaded to "
+                    f"{where}.</b> {why}"
+                )
+                notify(markup, "dialog-error", ("Open Folder", open_folder))
+            elif saved:
+                # Nothing saved and nothing failed means everything was cancelled.
+                markup = f"<b>Downloaded {saved} {util.pluralize('song', saved)} to {where}.</b>"
+                notify(markup, "folder-download-symbolic", ("Open Folder", open_folder))
+
+        def refresh(_: str):
+            # The songs' status icons show them downloading, wherever they are listed.
+            GLib.idle_add(self.update_window)
+
+        AdapterManager.batch_export_songs(
+            song_ids, directory, before_download=refresh, on_song_download_complete=refresh
+        ).add_done_callback(lambda f: GLib.idle_add(on_done, f))
 
     def on_go_to_album(self, action: Any, album_id: GLib.Variant):
         self.app_config.state.current_album_search_query = go_to_album_query(

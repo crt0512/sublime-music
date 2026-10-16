@@ -416,8 +416,12 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._failed_downloads.remove(song_id)
         elif progress.type == DownloadProgress.Type.ERROR:
             self._failed_downloads.add(song_id)
-            self.current_downloads_box.remove(self._current_download_boxes[song_id])
-            del self._current_download_boxes[song_id]
+            if song_id in self._pending_downloads:
+                self._pending_downloads.remove(song_id)
+            # A download can fail before (or without) ever reporting progress.
+            if song_id in self._current_download_boxes:
+                self.current_downloads_box.remove(self._current_download_boxes[song_id])
+                del self._current_download_boxes[song_id]
         elif progress.type == DownloadProgress.Type.PROGRESS:
             if song_id not in self._current_download_boxes:
                 # Create and add the box to show the progress.

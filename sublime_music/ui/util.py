@@ -357,6 +357,14 @@ def show_song_popover(
     remove_download_button = Gtk.ModelButton(
         text=f"Remove {pluralize('download', song_count)}", sensitive=False
     )
+    # Saves the files into a folder of the user's choice. Offline, only cached songs
+    # can be (see below).
+    download_to_button = Gtk.ModelButton(
+        text=f"Download {pluralize('song', song_count)} to...", sensitive=False
+    )
+    if not offline_mode:
+        download_to_button.set_action_target_value(GLib.Variant("as", song_ids))
+        download_to_button.set_action_name("app.download-to")
 
     # Retrieve songs and set the buttons as sensitive later.
     def on_get_song_details_done(songs: List[Song]):
@@ -379,6 +387,12 @@ def show_song_popover(
             play_next_button.set_action_name("app.play-next")
             add_to_queue_button.set_action_target_value(GLib.Variant("as", song_ids))
             add_to_queue_button.set_action_name("app.add-to-queue")
+        if offline_mode and all(
+            status in (SongCacheStatus.CACHED, SongCacheStatus.PERMANENTLY_CACHED)
+            for status in song_cache_statuses
+        ):
+            download_to_button.set_action_target_value(GLib.Variant("as", song_ids))
+            download_to_button.set_action_name("app.download-to")
 
         albums, artists, parents = set(), set(), set()
         for song in songs:
@@ -418,6 +432,7 @@ def show_song_popover(
         Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
         (download_song_button, on_download_songs_click),
         (remove_download_button, do_on_remove_downloads_click),
+        download_to_button,
         Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
         Gtk.ModelButton(
             text=f"Add {pluralize('song', song_count)} to playlist",

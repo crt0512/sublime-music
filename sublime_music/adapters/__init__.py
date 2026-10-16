@@ -10,7 +10,7 @@ from .adapter_base import (
     UIInfo,
 )
 from .configure_server_form import ConfigParamDescriptor, ConfigureServerForm
-from .manager import AdapterManager, DownloadProgress, Result, SearchResult
+from .manager import AdapterManager, DownloadProgress, Result, SearchResult, SongExportResult
 
 __all__ = (
     "Adapter",
@@ -22,6 +22,7 @@ __all__ = (
     "ConfigurationStore",
     "ConfigureServerForm",
     "DownloadProgress",
+    "SongExportResult",
     "LibrarySong",
     "Result",
     "SearchResult",
