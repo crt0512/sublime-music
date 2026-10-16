@@ -163,8 +163,9 @@ class AlbumWithSongs(Gtk.Box):
         self._pending_song_stars: Dict[str, bool] = {}
         self._pending_album_star: Optional[bool] = None
 
-        # clickable, cache status, title, duration, star icon, title weight, song ID
-        self.album_song_store = Gtk.ListStore(bool, str, str, str, str, int, str)
+        # clickable, cache status, title, duration, star icon, title weight, rating,
+        # song ID
+        self.album_song_store = Gtk.ListStore(bool, str, str, str, str, int, str, str)
 
         self.album_songs = Gtk.TreeView(
             model=self.album_song_store,
@@ -186,6 +187,9 @@ class AlbumWithSongs(Gtk.Box):
         self.album_songs.append_column(self.star_column)
 
         self.album_songs.append_column(SongListColumn("TITLE", 2, weight_idx=5))
+        self.rating_column = SongListColumn("RATING", 6, align=0.5, width=90)
+        self.rating_column.set_visible(False)
+        self.album_songs.append_column(self.rating_column)
         self.album_songs.append_column(SongListColumn("DURATION", 3, align=1, width=40))
 
         # Song status column.
@@ -445,6 +449,7 @@ class AlbumWithSongs(Gtk.Box):
                             if song.id == self.current_song_id
                             else Pango.Weight.NORMAL
                         ),
+                        util.format_rating(song.user_rating),
                         song.id,
                     ]
                 )
@@ -454,6 +459,7 @@ class AlbumWithSongs(Gtk.Box):
             util.diff_song_store(self.album_song_store, new_store)
 
         self.star_column.set_visible(AdapterManager.can_set_song_starred())
+        self.rating_column.set_visible(AdapterManager.can_get_song_rating())
         if self._pending_album_star is None:
             self._set_album_starred(album.starred is not None)
         self.star_album_btn.set_visible(AdapterManager.can_set_album_starred())
