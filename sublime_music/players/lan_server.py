@@ -20,6 +20,7 @@ import mimetypes
 import multiprocessing
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -271,6 +272,9 @@ class LanFileServer:
         return url
 
     def _run_server_process(self, sock: socket.socket):
+        # See the ping worker: the inherited GLib SIGTERM handler would make terminate()
+        # a no-op in this forked child.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
         app = bottle.Bottle()
         assert self._work_dir
         transcoder = _Transcoder(self._work_dir)

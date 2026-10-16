@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import multiprocessing
+import signal
 import os
 import pickle
 import random
@@ -317,10 +318,15 @@ class SubsonicAdapter(Adapter):
         self._ping_process = _ping_process_context().Process(
             target=self._check_ping_thread,
             args=(n,),
+            daemon=True,
         )
         self._ping_process.start()
 
     def _check_ping_thread(self, n: int):
+        # The forked child inherits the app's GLib SIGTERM handler, which only wakes a main
+        # loop this process doesn't run, so terminate() would never stop it and the app
+        # would hang at exit joining it.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
         i = 0
         while (
             i < n
