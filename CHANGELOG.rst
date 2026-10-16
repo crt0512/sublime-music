@@ -10,6 +10,14 @@ Unreleased
   again). Files already in the folder are never overwritten. The folder chooser remembers
   where you last saved to.
 
+**Bug Fixes**
+
+* Closing an album on the Albums tab animates again, instead of the albums below it
+  jumping up at once. Closing no longer rebuilds all of the album tiles below it,
+  which made the interface hang for a moment with many albums shown.
+* Cover art on the Albums tab no longer flashes empty when opening or closing an
+  album.
+
 v0.14.3
 ========
 This literally only exists because of this :

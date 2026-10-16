@@ -10,7 +10,7 @@ import pytest
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 
-from gi.repository import Gdk, GLib, GObject, Gtk  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, GLib, GObject, Gtk  # noqa: E402
 
 from sublime_music.adapters import AlbumSearchQuery, Result  # noqa: E402
 from sublime_music.ui import albums  # noqa: E402
@@ -177,12 +177,52 @@ def test_close_then_batch_opens_clicked_album_not_a_chunk_away(grid, library, qu
     _assert_window(grid)
 
 
-def test_deselection_merges_bottom_store(grid, library):
+def test_deselection_keeps_albums_in_place(grid, library):
+    _select(grid, library.config, 4)
+    below = list(grid.list_store_bottom)
+    tiles = [grid.grid_bottom.get_child_at_index(i) for i in range(len(below))]
+    library.config.state.selected_album_id = None
+    grid.update(grid.order_ratchet, library.config)
+    assert not grid.detail_box_revealer.get_reveal_child()
+    _drain_events()
+    assert grid._pending_reflow is None
+    assert grid.currently_selected_index is None
+    # Not rebuilt (that made closing slow and the cover art flash).
+    assert list(grid.list_store_bottom) == below
+    assert [grid.grid_bottom.get_child_at_index(i) for i in range(len(below))] == tiles
+    _assert_window(grid)
+
+
+def test_batches_after_deselection_stay_in_order(grid, library):
     _select(grid, library.config, 4)
     library.config.state.selected_album_id = None
     grid.update(grid.order_ratchet, library.config)
-    assert len(grid.list_store_bottom) == 0
+    _drain_events()
+    for _ in range(5):  # past MAX_LOADED_ALBUMS, so albums are dropped from the start
+        grid._load_after()
+        _assert_window(grid)
+    for _ in range(5):
+        grid._load_before()
+        _assert_window(grid)
+    _select(grid, library.config, 30)
+    _drain_events()
+    assert grid.currently_selected_index == 30
     _assert_window(grid)
+
+
+def test_moved_tile_keeps_decoded_cover_art(grid, library, monkeypatch):
+    monkeypatch.setattr(albums.AdapterManager, "get_cover_art_uri", lambda *a: Result("art.jpg"))
+    tile = grid.grid_top.get_child_at_index(10)
+    model = tile._album_model
+    pixbuf = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, 4, 4)
+    model.artwork.filename = "art.jpg"  # as if decoded
+    model.artwork.image.set_from_pixbuf(pixbuf)
+    _select(grid, library.config, 4)  # moves it to the bottom grid
+    _drain_events()
+    found, i = grid.list_store_bottom.find(model)
+    assert found
+    assert grid.grid_bottom.get_child_at_index(i) is not tile
+    assert model.artwork.image.get_pixbuf() is pixbuf
 
 
 def test_descending_selection_of_master_index_zero(grid, library):

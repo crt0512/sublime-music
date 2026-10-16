@@ -537,6 +537,9 @@ class AlbumsGrid(Gtk.Overlay):
             # The star next to the title in this album's tile (the latest tile, as the
             # grids rebuild tiles when albums move between them).
             self.star_icon: Optional[Gtk.Image] = None
+            # The cover art in this album's tile, so that a tile rebuilt for it (moving
+            # between the grids) can show the already decoded image right away.
+            self.artwork: Optional[SpinnerImage] = None
             super().__init__()
 
         @property
@@ -811,19 +814,23 @@ class AlbumsGrid(Gtk.Overlay):
                 # Keep a surviving tile anchored while whole rows above it are dropped.
                 self._hold_in_place(shown[-1])
             self.loaded_count += len(new_albums)
-            # Everything after the open album's row is in the bottom grid.
+            # Everything after the open album's row is in the bottom grid (closing an
+            # album leaves them there too).
             store = (
                 self.list_store_top
-                if self.currently_selected_index is None
+                if self.currently_selected_index is None and len(self.list_store_bottom) == 0
                 else self.list_store_bottom
             )
             store.splice(len(store), 0, new_albums)
 
             if (excess := self.loaded_count - MAX_LOADED_ALBUMS) > 0:
                 drop = min(self._whole_rows(excess), self.loaded_count)
-                if self.currently_selected_index is not None and drop >= len(self.list_store_top):
-                    self._close_detail_now()
-                    closed = True
+                if drop >= len(self.list_store_top):
+                    if self.currently_selected_index is not None:
+                        self._close_detail_now()
+                        closed = True
+                    else:
+                        self._merge_into_top()
                 self.list_store_top.splice(0, drop, [])
                 self.window_start += drop
                 self.loaded_count -= drop
@@ -853,15 +860,16 @@ class AlbumsGrid(Gtk.Overlay):
             self.loaded_count += count
 
             if (drop := self.loaded_count - MAX_LOADED_ALBUMS) > 0:
-                if self.currently_selected_index is not None and drop > len(
-                    self.list_store_bottom
-                ):
-                    self._close_detail_now()
-                    closed = True
+                if drop > len(self.list_store_bottom):
+                    if self.currently_selected_index is not None:
+                        self._close_detail_now()
+                        closed = True
+                    else:
+                        self._merge_into_top()
                 store = (
-                    self.list_store_top
-                    if self.currently_selected_index is None
-                    else self.list_store_bottom
+                    self.list_store_bottom
+                    if len(self.list_store_bottom) > 0
+                    else self.list_store_top
                 )
                 store.splice(len(store) - drop, drop, [])
                 self.loaded_count -= drop
@@ -883,13 +891,18 @@ class AlbumsGrid(Gtk.Overlay):
         self.detail_box_revealer.set_transition_type(Gtk.RevealerTransitionType.NONE)
         self.detail_box_revealer.set_reveal_child(False)
         self.detail_box_revealer.set_transition_type(transition)
-        below = list(self.list_store_bottom)
-        self.list_store_bottom.splice(0, len(below), [])
-        self.list_store_top.splice(len(self.list_store_top), 0, below)
+        self._merge_into_top()
         self.currently_selected_index = None
         self.currently_selected_id = None
         self.grid_top.unselect_all()
         # The batch caller notifies the app once eviction and offsets are committed.
+
+    def _merge_into_top(self):
+        """Puts all of the albums into the top grid (no album may be open)."""
+        below = list(self.list_store_bottom)
+        if below:
+            self.list_store_top.splice(len(self.list_store_top), 0, below)
+            self.list_store_bottom.splice(0, len(below), [])
 
     # Keeping an album in the same place on the screen while things around it change
     # =========================================================================
@@ -927,9 +940,9 @@ class AlbumsGrid(Gtk.Overlay):
             (self.list_store_top, self.grid_top),
             (self.list_store_bottom, self.grid_bottom),
         ):
-            for i, m in enumerate(store):
-                if m is model:
-                    return grid.get_child_at_index(i)
+            found, i = store.find(model)
+            if found:
+                return grid.get_child_at_index(i)
         return None
 
     def _tile_y(self, model: "AlbumsGrid._AlbumModel") -> Optional[int]:
@@ -1264,6 +1277,16 @@ class AlbumsGrid(Gtk.Overlay):
             image_size=200,
         )
         widget_box.pack_start(artwork, False, False, 0)
+        # The album's previous tile, if it is being moved to the other grid (the new
+        # tile is made before the old one goes).
+        previous_artwork = item.artwork
+        item.artwork = artwork
+
+        def on_artwork_destroyed(_):
+            if item.artwork is artwork:
+                item.artwork = None
+
+        artwork.connect("destroy", on_artwork_destroyed)
 
         # Header for the widget: the title, with a star after it if the album is starred.
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, name="grid-header")
@@ -1289,7 +1312,12 @@ class AlbumsGrid(Gtk.Overlay):
         def on_artwork_downloaded(filename: Result[str]):
             # Decoded off the main thread: tiles are made in batches of 50 (with "All",
             # while scrolling), and decoding them all here made the scrolling stutter.
-            artwork.set_from_file_async(filename.result())
+            # A tile replacing another one takes its image instead, so that it doesn't
+            # flash empty until the image is decoded again.
+            if not previous_artwork or not artwork.take_image_from(
+                previous_artwork, filename.result()
+            ):
+                artwork.set_from_file_async(filename.result())
             artwork.set_loading(False)
 
         cover_art_filename_future = AdapterManager.get_cover_art_uri(item.album.cover_art, "file")
@@ -1336,20 +1364,26 @@ class AlbumsGrid(Gtk.Overlay):
 
         if (
             not force_reload_from_master
-            and selected_index is not None
             and selected_index != self.currently_selected_index
             and (self.detail_box_revealer.get_reveal_child() or self._pending_reflow is not None)
         ):
             # Another album's details are open: close them first. The rest of this reflow
-            # (moving the fold, opening the new album's details) runs once they are closed,
-            # see _on_detail_box_child_revealed. Later calls replace the pending reflow.
+            # (moving the fold, opening the new album's details if any) runs once they are
+            # closed, see _on_detail_box_child_revealed. Later calls replace the pending
+            # reflow. Moving the albums below the fold up right away would leave the
+            # details below all of them, so their closing couldn't be seen.
             self._pending_reflow = (force_reload_from_master, selected_index, models)
-            # Keep the clicked album where it is while the open one closes above it (the
-            # albums below it would move up), until it opens and scrolls into view.
-            ordered = self._ordered(models or self.current_models)
-            if 0 <= selected_index < len(ordered):
-                self._hold_in_place(ordered[selected_index], until_released=True)
-            self._keep_height()
+            if selected_index is None:
+                # Just closing: nothing to keep in place (a switch may have set a hold).
+                self._release_hold()
+            else:
+                # Keep the clicked album where it is while the open one closes above it
+                # (the albums below it would move up), until it opens and scrolls into
+                # view.
+                ordered = self._ordered(models or self.current_models)
+                if 0 <= selected_index < len(ordered):
+                    self._hold_in_place(ordered[selected_index], until_released=True)
+                self._keep_height()
             self.detail_box_revealer.set_reveal_child(False)
             if not self.detail_box_revealer.get_child_revealed():
                 # With animations disabled (or before first allocation), it may
@@ -1369,8 +1403,17 @@ class AlbumsGrid(Gtk.Overlay):
         else:
             window = list(self.list_store_top) + list(self.list_store_bottom)
 
-        # Determine where the cuttoff is between the top and bottom grids.
+        # Determine where the cuttoff is between the top and bottom grids. Closing an
+        # album leaves the fold where it is: moving the albums below it up would
+        # rebuild all of their tiles. Unless the top grid's last row isn't full (the
+        # window was resized), which would leave a gap.
         entries_before_fold = len(window)
+        if (
+            selected_index is None
+            and not force_reload_from_master
+            and len(self.list_store_top) % max(1, self.items_per_row) == 0
+        ):
+            entries_before_fold = len(self.list_store_top)
         if selected_index is not None and self.items_per_row:
             relative_selected_index = selected_index - page_offset
             entries_before_fold = (
@@ -1396,9 +1439,7 @@ class AlbumsGrid(Gtk.Overlay):
             )
         else:
             # This case handles when the selection changes and the entries need to be
-            # re-allocated to the top and bottom grids, including deselection. Leaving
-            # the bottom store populated on close makes the next batch append ahead
-            # of it, corrupting display order and the selected-index lookup.
+            # re-allocated to the top and bottom grids.
             # Move entries between the two stores.
             top_store_len = len(self.list_store_top)
             bottom_store_len = len(self.list_store_bottom)
@@ -1455,5 +1496,7 @@ class AlbumsGrid(Gtk.Overlay):
         else:
             self.grid_top.unselect_all()
             self.grid_bottom.unselect_all()
+            # A switch to another album that was cancelled by closing kept the height.
+            self._give_back_height()
 
         self.currently_selected_index = selected_index

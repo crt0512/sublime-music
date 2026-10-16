@@ -49,6 +49,7 @@ class SpinnerImage(Gtk.Overlay):
 
         def apply(pixbuf: GdkPixbuf.Pixbuf) -> bool:
             if self._decode_token is token:  # not replaced by another image since
+                self._decode_token = None
                 self.image.set_from_pixbuf(pixbuf)
             return False
 
@@ -61,6 +62,26 @@ class SpinnerImage(Gtk.Overlay):
             GLib.idle_add(apply, pixbuf)
 
         _decoder.submit(decode)
+
+    def take_image_from(self, other: "SpinnerImage", filename: Optional[str]) -> bool:
+        """
+        Shows the image ``other`` already shows for ``filename`` (at the same size).
+        Returns whether it could: not if ``other`` shows another file or hasn't decoded
+        it yet.
+        """
+        pixbuf = other.image.get_pixbuf()
+        if (
+            not filename
+            or other.filename != filename
+            or other.image_size != self.image_size
+            or other._decode_token is not None
+            or pixbuf is None
+        ):
+            return False
+        self._decode_token = None
+        self.filename = filename
+        self.image.set_from_pixbuf(pixbuf)
+        return True
 
     def set_from_file(self, filename: Optional[str]):
         """Set the image to the given filename."""
