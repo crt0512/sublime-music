@@ -958,11 +958,25 @@ class SublimeMusicApp(Gtk.Application):
         self.app_config.download_to_directory = directory
         self.app_config.save()
 
-        def notify(markup: str, icon: str, *actions: Tuple[str, Callable[[], None]]):
-            self.app_config.state.current_notification = UIState.UINotification(
-                markup=markup, icon=icon, actions=actions
-            )
+        def notify(
+            markup: str,
+            icon: str,
+            *actions: Tuple[str, Callable[[], None]],
+            hide_after: Optional[int] = None,
+        ):
+            notification = UIState.UINotification(markup=markup, icon=icon, actions=actions)
+            self.app_config.state.current_notification = notification
             self.update_window()
+
+            def hide() -> bool:
+                # Unless something else is being shown by now.
+                if self.app_config.state.current_notification is notification:
+                    self.app_config.state.current_notification = None
+                    self.update_window()
+                return False
+
+            if hide_after:
+                GLib.timeout_add_seconds(hide_after, hide)
 
         def open_folder():
             Gtk.show_uri_on_window(self.window, directory.as_uri(), Gdk.CURRENT_TIME)
@@ -989,7 +1003,10 @@ class SublimeMusicApp(Gtk.Application):
             elif saved:
                 # Nothing saved and nothing failed means everything was cancelled.
                 markup = f"<b>Downloaded {saved} {util.pluralize('song', saved)} to {where}.</b>"
-                notify(markup, "folder-download-symbolic", ("Open Folder", open_folder))
+                # Good news needs no dismissing; errors stay until read.
+                notify(
+                    markup, "folder-download-symbolic", ("Open Folder", open_folder), hide_after=5
+                )
 
         def refresh(_: str):
             # The songs' status icons show them downloading, wherever they are listed.

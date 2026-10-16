@@ -12,11 +12,16 @@ Unreleased
 
 **Bug Fixes**
 
+<<<<<<< HEAD
 * Closing an album on the Albums tab animates again, instead of the albums below it
   jumping up at once. Closing no longer rebuilds all of the album tiles below it,
   which made the interface hang for a moment with many albums shown.
 * Cover art on the Albums tab no longer flashes empty when opening or closing an
   album.
+=======
+* The notification bar at the bottom of the window was styled for the top of one: its
+  rounded corners are now at the top, and it slides up into view.
+>>>>>>> edd7368 (fixes)
 
 v0.14.3
 ========

@@ -95,7 +95,11 @@ class MainWindow(Gtk.ApplicationWindow):
 
         notification_container.add(self.stack)
 
-        self.notification_revealer = Gtk.Revealer(valign=Gtk.Align.END, halign=Gtk.Align.CENTER)
+        self.notification_revealer = Gtk.Revealer(
+            valign=Gtk.Align.END,
+            halign=Gtk.Align.CENTER,
+            transition_type=Gtk.RevealerTransitionType.SLIDE_UP,
+        )
 
         notification_box = Gtk.Box(can_focus=False, valign="start", spacing=10)
         notification_box.get_style_context().add_class("app-notification")

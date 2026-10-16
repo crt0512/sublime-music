@@ -378,3 +378,13 @@ entry.invalid {
               inset 0 -5px 5px @box_shadow_color;
   background-color: @box_shadow_color;
 }
+
+/* ********** Notification Bar ********** */
+/* Themes style .app-notification for a bar hanging from the top of the window: rounded
+   bottom corners and a shade along its top edge. Ours sits at the bottom, on top of the
+   player controls, so turn it upside down. */
+.app-notification,
+.app-notification.frame {
+  border-radius: 5px 5px 0 0;
+  background-image: linear-gradient(to top, rgba(0, 0, 0, 0.2), transparent 2px);
+}
