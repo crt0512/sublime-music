@@ -101,14 +101,23 @@ THIN_RECOMMENDS := $(RECOMMENDS), python3-keyring
 
 SOURCES := $(shell find $(PACKAGE) -type f -not -path '*/__pycache__/*')
 
-.PHONY: help build vendor vendor-lock freeze stage install uninstall deb pkg run test lint format venv clean distclean
+.PHONY: help build vendor vendor-lock freeze stage install uninstall deb pkg run test lint format venv clean distclean macports-variants
 
 help: ## Show this help
 	@echo "Sublime Music (Plus) $(VERSION), flavour: $(FLAVOUR) (BUNDLE=$(BUNDLE))"
 	@echo
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | sed 's/:.*## /|/' | sort | awk -F'|' '{printf "  %-12s %s\n", $$1, $$2}'
 	@echo
+	@if [ "$(shell uname)" = Darwin ]; then \
+	    echo "macOS build note:"; \
+	    echo "  echo \"-x11 +quartz\" | sudo tee -a /opt/local/etc/macports/variants.conf"; \
+	    echo "  sudo port install python313 py313-pip py313-gobject3 gtk3 gobject-introspection adwaita-icon-theme librsvg mpv +libmpv fontconfig"; \
+	    echo; \
+	fi
 	@echo "Variables: PYTHON=$(PYTHON) PREFIX=$(PREFIX) DESTDIR=$(DESTDIR) BUNDLE=$(BUNDLE)$(if $(filter Darwin,$(shell uname)), MACOS_PKGMGR=$(MACOS_PKGMGR) MACOS_PREFIX=$(MACOS_PREFIX))"
+
+macports-variants: ## Set MacPorts to prefer Quartz over X11 for GTK builds: echo "-x11 +quartz" | sudo tee -a /opt/local/etc/macports/variants.conf
+	@echo "-x11 +quartz" | sudo tee -a /opt/local/etc/macports/variants.conf
 
 # ----------------------------------------------------------------------------
 # Building
@@ -151,6 +160,15 @@ PYI_PYTHON := $(or $(MACOS_PYTHON),$(PYTHON))
 
 $(PYI_VENV)/.stamp: pyproject.toml $(wildcard $(VENDOR_LOCK))
 	rm -rf $(PYI_VENV)
+	@if [ "$(shell uname)" = Darwin ] && [ -z "$(MACOS_PYTHON)" ]; then \
+	    echo "No Python with PyGObject was found under $(MACOS_PREFIX)."; \
+	    echo "Install the build dependencies first, e.g.:"; \
+	    echo "  brew install python@3 pygobject3 gtk+3 gobject-introspection adwaita-icon-theme librsvg mpv fontconfig"; \
+	    echo "or, for MacPorts:"; \
+	    echo "  echo \"-x11 +quartz\" | sudo tee -a /opt/local/etc/macports/variants.conf"; \
+	    echo "  sudo port install python313 py313-pip py313-gobject3 gtk3 gobject-introspection adwaita-icon-theme librsvg mpv +libmpv fontconfig"; \
+	    exit 1; \
+	fi
 	$(PYI_PYTHON) -m venv --system-site-packages $(PYI_VENV)
 	$(PYI_VENV)/bin/pip install --upgrade pip
 	$(PYI_VENV)/bin/pip install --ignore-installed $(VENDOR_SPEC) $(MACOS_DEPS) "pyinstaller >=6, <7"
@@ -316,6 +334,7 @@ $(ICNS): $(MAC_ICON)
 pkg: ## macOS only: build "Sublime Music.app" and dist/SublimeMusic-<version>-<flavour>.pkg
 	@test "$$(uname)" = Darwin || { echo "make pkg builds a macOS bundle and only works on macOS"; exit 1; }
 	@test -n "$(MACOS_PREFIX)" || { echo "Homebrew or MacPorts is required to build the app, see packaging/macos/README.md"; exit 1; }
+	@test -n "$(MACOS_PYTHON)" || { echo "No Python with PyGObject was found under $(MACOS_PREFIX). Install the build dependencies first, e.g.:"; echo "  brew install python@3 pygobject3 gtk+3 gobject-introspection adwaita-icon-theme librsvg mpv fontconfig"; echo "or, for MacPorts:"; echo "  echo \"-x11 +quartz\" | sudo tee -a /opt/local/etc/macports/variants.conf"; echo "  sudo port install python313 py313-pip py313-gobject3 gtk3 gobject-introspection adwaita-icon-theme librsvg mpv +libmpv fontconfig"; exit 1; }
 	$(MAKE) $(ICNS)
 	rm -rf "$(APP)"
 ifneq ($(FLAVOUR),thin)
@@ -341,7 +360,11 @@ endif
 	rm -rf $(BUILD)/pkgroot && mkdir -p $(BUILD)/pkgroot dist
 	cp -R "$(APP)" $(BUILD)/pkgroot/
 	pkgbuild --analyze --root $(BUILD)/pkgroot $(BUILD)/component.plist
-	/usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" $(BUILD)/component.plist
+	@if /usr/libexec/PlistBuddy -c "Print :0:BundleIsRelocatable" $(BUILD)/component.plist >/dev/null 2>&1; then \
+	    /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" $(BUILD)/component.plist; \
+	else \
+	    /usr/libexec/PlistBuddy -c "Add :0:BundleIsRelocatable bool false" $(BUILD)/component.plist; \
+	fi
 	pkgbuild --root $(BUILD)/pkgroot --component-plist $(BUILD)/component.plist \
 	    --identifier $(APP_ID) --version $(VERSION) --install-location /Applications $(PKG)
 	@echo "Built $(PKG)"
