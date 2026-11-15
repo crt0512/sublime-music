@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, ca
 
 import peewee
 from gi.repository import Gtk
-from peewee import fn, prefetch
+from peewee import fn
 from playhouse.migrate import SqliteMigrator, migrate
 
 from sublime_music.adapters import api_objects as API
@@ -82,6 +82,9 @@ class FilesystemAdapter(CachingAdapter):
         self.is_cache = is_cache
 
         self.db_write_lock: threading.Lock = threading.Lock()
+        # Goes up whenever cached data other than cover art changes, so that the UI can
+        # tell whether it needs to reload anything.
+        self.data_version = 0
         database_filename = data_directory.joinpath("cache.db")
         models.database.init(str(database_filename))
         models.database.connect()
@@ -278,13 +281,18 @@ class FilesystemAdapter(CachingAdapter):
 
     # Data Retrieval Methods
     # ==================================================================================
-    def get_cached_statuses(self, song_ids: Sequence[str]) -> Dict[str, SongCacheStatus]:
-        def compute_song_cache_status(song: models.Song) -> SongCacheStatus:
+    def _cached_statuses_where(self, condition: Any) -> Dict[str, SongCacheStatus]:
+        """The cache statuses of the songs matching ``condition``, by song ID."""
+
+        def compute_song_cache_status(row: Dict[str, Any]) -> SongCacheStatus:
             try:
-                file = cast(models.CacheInfo, song.file)
-                if self._compute_song_filename(file).exists():
-                    if file.valid:
-                        if file.cache_permanently:
+                # Same rule as _library_song: only downloaded files have a hash, which
+                # saves a stat call for every song that was never downloaded.
+                if row["file_hash"] and (
+                    self._song_filename(row["file_path"], row["file_hash"]).exists()
+                ):
+                    if row["file_valid"]:
+                        if row["file_permanent"]:
                             return SongCacheStatus.PERMANENTLY_CACHED
                         return SongCacheStatus.CACHED
 
@@ -295,19 +303,39 @@ class FilesystemAdapter(CachingAdapter):
 
             return SongCacheStatus.NOT_CACHED
 
+        # One joined query: these are looked up for every visible song list on every
+        # window update, so loading full models (with prefetch) made that slow.
+        File = models.CacheInfo
+        rows = cast(
+            Iterable[Dict[str, Any]],
+            models.Song.select(
+                models.Song.id.alias("id"),
+                File.path.alias("file_path"),
+                File.file_hash.alias("file_hash"),
+                File.valid.alias("file_valid"),
+                File.cache_permanently.alias("file_permanent"),
+            )
+            .join(
+                File,
+                peewee.JOIN.LEFT_OUTER,
+                on=((models.Song.file == File.id) & (File.cache_key == KEYS.SONG_FILE)),
+            )
+            .where(condition)
+            .dicts(),
+        )
+        return {row["id"]: compute_song_cache_status(row) for row in rows}
+
+    def get_cached_statuses(self, song_ids: Sequence[str]) -> Dict[str, SongCacheStatus]:
         cached_statuses = {song_id: SongCacheStatus.NOT_CACHED for song_id in song_ids}
         try:
-            file_models = models.CacheInfo.select().where(
-                models.CacheInfo.cache_key == KEYS.SONG_FILE
-            )
-            song_models = models.Song.select().where(models.Song.id.in_(song_ids))
-            cached_statuses.update(
-                {s.id: compute_song_cache_status(s) for s in prefetch(song_models, file_models)}
-            )
+            cached_statuses.update(self._cached_statuses_where(models.Song.id.in_(list(song_ids))))
         except Exception:
-            pass
+            logging.exception("Failed to get cached song statuses")
 
         return cached_statuses
+
+    def get_album_cached_statuses(self, album_ids: Sequence[str]) -> Dict[str, SongCacheStatus]:
+        return self._cached_statuses_where(models.Song.album.in_(list(album_ids)))
 
     _playlists = None
 
@@ -883,16 +911,27 @@ class FilesystemAdapter(CachingAdapter):
 
     def search(self, query: str) -> API.SearchResult:
         search_result = API.SearchResult(query)
-        search_result.add_results("albums", self.get_all_albums())
+        # Ranking reads every album's and song's artist name: join the artists in, rather
+        # than querying them one at a time (which took seconds with big libraries).
+        search_result.add_results(
+            "albums",
+            models.Album.select(models.Album, models.Artist)
+            .join(
+                models.Artist, peewee.JOIN.LEFT_OUTER, on=(models.Album.artist == models.Artist.id)
+            )
+            .where(
+                ~(models.Album.id.startswith("invalid:")),
+                models.Album.artist.is_null(False),
+            ),
+        )
         search_result.add_results("artists", self.get_artists(ignore_cache_miss=True))
         search_result.add_results(
             "songs",
-            self._get_list(
-                models.Song,
-                CachingAdapter.CachedDataKey.SONG,
-                ignore_cache_miss=True,
-                where_clauses=(models.Song.artist.is_null(False),),
-            ),
+            models.Song.select(models.Song, models.Artist)
+            .join(
+                models.Artist, peewee.JOIN.LEFT_OUTER, on=(models.Song.artist == models.Artist.id)
+            )
+            .where(models.Song.artist.is_null(False)),
         )
         search_result.add_results(
             "playlists",
@@ -917,6 +956,7 @@ class FilesystemAdapter(CachingAdapter):
         # transaction.
         with self.db_write_lock, models.database.atomic():
             self._do_ingest_new_data(data_key, param, data)
+            self._data_changed(data_key)
 
     def invalidate_data(self, key: CachingAdapter.CachedDataKey, param: Optional[str]):
         assert self.is_cache, "FilesystemAdapter is not in cache mode!"
@@ -925,6 +965,7 @@ class FilesystemAdapter(CachingAdapter):
         # transaction.
         with self.db_write_lock, models.database.atomic():
             self._do_invalidate_data(key, param)
+            self._data_changed(key)
 
     def delete_data(self, key: CachingAdapter.CachedDataKey, param: Optional[str]):
         assert self.is_cache, "FilesystemAdapter is not in cache mode!"
@@ -933,6 +974,11 @@ class FilesystemAdapter(CachingAdapter):
         # transaction.
         with self.db_write_lock, models.database.atomic():
             self._do_delete_data(key, param)
+            self._data_changed(key)
+
+    def _data_changed(self, key: CachingAdapter.CachedDataKey):
+        if key != KEYS.COVER_ART_FILE:
+            self.data_version += 1
 
     def _do_ingest_new_data(
         self,
@@ -1375,6 +1421,11 @@ class FilesystemAdapter(CachingAdapter):
                 self._do_invalidate_data(KEYS.COVER_ART_FILE, artist.artist_image_url)
                 for album in models.Album.select().where(models.Album.artist == artist):
                     self._do_invalidate_data(CachingAdapter.CachedDataKey.ALBUM, album.id)
+
+        elif data_key == KEYS.PLAYLISTS:
+            models.CacheInfo.update({"valid": False}).where(
+                models.CacheInfo.cache_key == KEYS.PLAYLIST_DETAILS
+            ).execute()
 
         elif data_key == KEYS.PLAYLIST_DETAILS:
             # Invalidate the corresponding cover art.

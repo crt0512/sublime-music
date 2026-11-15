@@ -369,6 +369,29 @@ def test_invalidate_playlist(cache_adapter: FilesystemAdapter):
         assert e.partial_data == stale_uri_2
 
 
+def test_refresh_playlist_list_invalidates_all_contents(cache_adapter: FilesystemAdapter):
+    data = [
+        SubsonicAPI.Playlist("1", "One", songs=MOCK_SUBSONIC_SONGS[:1]),
+        SubsonicAPI.Playlist("2", "Two", songs=MOCK_SUBSONIC_SONGS[1:2]),
+    ]
+    cache_adapter.ingest_new_data(KEYS.PLAYLISTS, None, data)
+    for playlist in data:
+        cache_adapter.ingest_new_data(KEYS.PLAYLIST_DETAILS, playlist.id, playlist)
+        assert len(cache_adapter.get_playlist_details(playlist.id).songs) == 1
+    cache_adapter.invalidate_data(KEYS.PLAYLISTS, None)
+    cache_adapter.ingest_new_data(
+        KEYS.PLAYLISTS, None, [SubsonicAPI.Playlist(p.id, p.name) for p in data]
+    )
+    for playlist in data:
+        try:
+            cache_adapter.get_playlist_details(playlist.id)
+        except CacheMissError as error:
+            assert error.partial_data is not None
+            assert len(error.partial_data.songs) == 1
+        else:
+            pytest.fail("Playlist contents were not invalidated")
+
+
 def test_invalidate_song_file(cache_adapter: FilesystemAdapter):
     cache_adapter.ingest_new_data(KEYS.SONG, "2", MOCK_SUBSONIC_SONGS[0])
     cache_adapter.ingest_new_data(KEYS.SONG, "1", MOCK_SUBSONIC_SONGS[1])
@@ -423,6 +446,61 @@ def test_get_cached_statuses(cache_adapter: FilesystemAdapter):
 
     cache_adapter.delete_data(KEYS.SONG_FILE, "1")
     assert cache_adapter.get_cached_statuses(["1"]) == {"1": SongCacheStatus.NOT_CACHED}
+
+
+def test_get_album_cached_statuses(cache_adapter: FilesystemAdapter):
+    cache_adapter.ingest_new_data(KEYS.SONG, "1", MOCK_SUBSONIC_SONGS[1])
+    cache_adapter.ingest_new_data(KEYS.SONG, "2", MOCK_SUBSONIC_SONGS[0])
+    assert cache_adapter.get_album_cached_statuses(["a1"]) == {
+        "1": SongCacheStatus.NOT_CACHED,
+        "2": SongCacheStatus.NOT_CACHED,
+    }
+
+    cache_adapter.ingest_new_data(KEYS.SONG_FILE, "1", (None, MOCK_SONG_FILE, None))
+    assert cache_adapter.get_album_cached_statuses(["a1", "other"])["1"] == (
+        SongCacheStatus.CACHED
+    )
+    assert cache_adapter.get_album_cached_statuses(["other"]) == {}
+
+
+def test_data_version(cache_adapter: FilesystemAdapter):
+    version = cache_adapter.data_version
+    cache_adapter.ingest_new_data(KEYS.SONG, "1", MOCK_SUBSONIC_SONGS[1])
+    assert cache_adapter.data_version > version
+
+    # Cover art doesn't change any of the data shown in lists.
+    version = cache_adapter.data_version
+    cache_adapter.ingest_new_data(KEYS.COVER_ART_FILE, "s1", MOCK_ALBUM_ART)
+    assert cache_adapter.data_version == version
+
+    cache_adapter.invalidate_data(KEYS.SONG, "1")
+    assert cache_adapter.data_version > version
+
+    version = cache_adapter.data_version
+    cache_adapter.delete_data(KEYS.SONG, "1")
+    assert cache_adapter.data_version > version
+
+
+def test_album_songs_single_query(
+    cache_adapter: FilesystemAdapter, monkeypatch: pytest.MonkeyPatch
+):
+    for song in MOCK_SUBSONIC_SONGS[:2]:
+        cache_adapter.ingest_new_data(KEYS.SONG, song.id, song)
+    album = models.Album.get_by_id("a1")
+
+    queries = []
+    execute_sql = models.database.execute_sql
+    monkeypatch.setattr(
+        models.database,
+        "execute_sql",
+        lambda sql, *args, **kwargs: queries.append(sql) or execute_sql(sql, *args, **kwargs),
+    )
+    songs = album.songs
+    assert sorted((s.id, s.artist.name, s.album.name) for s in songs) == [
+        ("1", "foo", "foo"),
+        ("2", "cool", "foo"),
+    ]
+    assert len(queries) == 1
 
 
 def test_delete_playlists(cache_adapter: FilesystemAdapter):
@@ -1074,6 +1152,33 @@ def test_search(cache_adapter: FilesystemAdapter):
     ]
     assert [a.name for a in search_result.artists] == ["foo", "better boo"]
     assert [a.name for a in search_result.albums] == ["Foo", "Boo"]
+
+
+def test_search_ranking_does_not_query_artists_per_result(
+    cache_adapter: FilesystemAdapter, monkeypatch: pytest.MonkeyPatch
+):
+    search_result = SublimeAPI.SearchResult("")
+    search_result.add_results(
+        "songs",
+        [
+            SubsonicAPI.Song(f"s{i}", f"song {i}", _artist=f"artist {i}", artist_id=f"ar{i}")
+            for i in range(30)
+        ],
+    )
+    cache_adapter.ingest_new_data(KEYS.SEARCH_RESULTS, None, search_result)
+
+    result = cache_adapter.search("artist")
+    queries = []
+    execute_sql = models.database.execute_sql
+    monkeypatch.setattr(
+        models.database,
+        "execute_sql",
+        lambda sql, *args, **kwargs: queries.append(sql) or execute_sql(sql, *args, **kwargs),
+    )
+    ranked = SublimeAPI.SearchResult("artist")
+    ranked.update(result)
+    assert len(ranked.songs) == 20
+    assert queries == []
 
 
 def test_caching_get_artists_keeps_artists_referenced_by_songs(cache_adapter: FilesystemAdapter):

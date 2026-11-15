@@ -93,6 +93,7 @@ def library(monkeypatch):
     config = SimpleNamespace(
         state=SimpleNamespace(
             selected_album_id=None,
+            album_navigation_token=0,
             current_song=None,
             current_album_search_query=AlbumSearchQuery(AlbumSearchQuery.Type.NEWEST),
             album_sort_direction="ascending",
@@ -155,6 +156,63 @@ def _assert_window(grid):
 def _tile_label(child):
     header = child.get_child().get_children()[1]
     return header.get_children()[0].get_text()
+
+
+def test_new_query_at_same_index_replaces_details(
+    grid: albums.AlbumsGrid, library: SimpleNamespace
+):
+    _select(grid, library.config, 4)
+    library.data.reverse()
+    library.config.state.current_album_search_query = AlbumSearchQuery(
+        AlbumSearchQuery.Type.ALPHABETICAL_BY_NAME
+    )
+    library.config.state.selected_album_id = library.data[4].id
+    grid.update(grid.update_params(library.config), library.config)
+    assert grid.detail_box_inner.get_children()[0].album.id == library.data[4].id
+
+
+def test_go_to_open_album_scrolls_again(
+    grid: albums.AlbumsGrid, library: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    _select(grid, library.config, 4)
+    scroll = Mock()
+    monkeypatch.setattr(grid, "_scroll_to_detail", scroll)
+    library.config.state.album_navigation_token = 1
+    grid.update(grid.order_ratchet, library.config)
+    scroll.assert_called_once()
+
+
+@pytest.mark.parametrize("direction", ["ascending", "descending"])
+def test_go_to_album_outside_loaded_window_lands_on_requested_details(
+    grid: albums.AlbumsGrid, library: SimpleNamespace, direction: str
+):
+    config = library.config
+    config.state.album_sort_direction = direction
+    grid.update(grid.order_ratchet, config)
+    window = Gtk.Window()
+    window.set_default_size(1000, 600)
+    window.add(grid)
+    window.show_all()
+
+    def settled():
+        return grid._laid_out() and not grid._load_more_pending
+
+    try:
+        _wait_for(settled)
+        for index in (330, 15, 215):
+            config.state.album_navigation_token += 1
+            _select(grid, config, index)
+            _wait_for(settled)
+            _assert_window(grid)
+            assert grid.currently_selected_index == index
+            adjustment = grid.scrolled_window.get_vadjustment()
+            target = grid._detail_scroll_target(adjustment)
+            assert target is not None
+            assert abs(adjustment.get_value() - target) < 2
+    finally:
+        grid._stop_scroll()
+        window.remove(grid)
+        window.destroy()
 
 
 @pytest.mark.parametrize("queued", [False, True])

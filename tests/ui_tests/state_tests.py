@@ -31,3 +31,18 @@ def test_state_from_before_the_song_tab_gets_defaults():
     loaded.migrate()
     assert loaded.song_query == SongQuery()
     assert loaded.song_columns is None
+
+
+def test_playlist_sort_persists_and_old_state_gets_default():
+    state = UIState()
+    state.playlist_sort = "changed_desc"
+    loaded = pickle.loads(pickle.dumps(state))
+    assert loaded.playlist_sort == "changed_desc"
+    old = state.__getstate__()
+    del old["playlist_sort"]
+    del old["album_navigation_token"]
+    loaded = UIState.__new__(UIState)
+    loaded.__setstate__(old)
+    loaded.migrate()
+    assert loaded.playlist_sort == "name_asc"
+    assert loaded.album_navigation_token == 0

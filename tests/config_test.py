@@ -24,6 +24,13 @@ def test_config_default_cache_location():
     assert config.cache_location == Path("~/.local/share/sublime-music").expanduser()
 
 
+def test_mpris_raise_is_opt_in_and_persisted():
+    assert not AppConfiguration().mpris_allow_raise
+    assert not AppConfiguration.from_json("{}").mpris_allow_raise
+    config = AppConfiguration(mpris_allow_raise=True)
+    assert AppConfiguration.from_json(config.to_json()).mpris_allow_raise
+
+
 def test_server_property(tmp_path: Path):
     config = AppConfiguration()
     config.cache_location = tmp_path

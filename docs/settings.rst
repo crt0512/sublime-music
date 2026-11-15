@@ -15,6 +15,11 @@ Enable Song Notifications : (``bool``)
     play. The notification will contain the title, artist name, album name, and
     cover art of the song.
 
+Allow MPRIS to Focus the Window : (``bool``, default off)
+    Allows desktop media controls to bring Sublime Music to the foreground through
+    MPRIS. When off, MPRIS reports that raising the window is unavailable and ignores
+    raise requests. Playback controls still work.
+
 Replay Gain : (Disabled | Track | Album)
     Configures the replay gain setting for the MPV player. You can disable this
     setting, or configure it to work on a track or album basis.
@@ -65,6 +70,17 @@ Number of Songs to Prefetch : (``int``)
 Maximum Concurrent Downloads : (``int``)
     Specifies the maximum number of songs that should be downloaded at the same
     time.
+
+Playlist Sorting and Refresh
+----------------------------
+
+The dropdown above the playlists sorts them by name, creation date, or modification
+date, in either direction. The choice is remembered per music provider. Playlists
+without a date are placed last when sorting by that date.
+
+The refresh button above the list refreshes the playlist list and the selected
+playlist's contents. Other playlists' cached contents are marked stale and fetched
+again when opened; their cached songs remain available offline.
 
 Music Provider Settings
 -----------------------

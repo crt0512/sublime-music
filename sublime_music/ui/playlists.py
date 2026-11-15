@@ -7,6 +7,7 @@ from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
 from thefuzz import fuzz
 
 from ..adapters import AdapterManager, api_objects as API
+from ..adapters.api_objects import sort_playlists
 from ..config import AppConfiguration
 from ..ui import util
 from ..ui.common import IconButton, LoadError, SongListColumn, SpinnerImage
@@ -93,6 +94,9 @@ class PlaylistsPanel(Gtk.Paned):
         Gtk.Paned.__init__(self, orientation=Gtk.Orientation.HORIZONTAL)
 
         self.playlist_list = PlaylistList()
+        self.playlist_list.connect(
+            "refresh-window", lambda _, *args: self.emit("refresh-window", *args)
+        )
         self.pack1(self.playlist_list, False, True)
         self.set_position(200)
 
@@ -149,6 +153,23 @@ class PlaylistList(Gtk.Box):
         playlist_list_actions.pack_end(self.list_refresh_button)
 
         self.add(playlist_list_actions)
+
+        self.sort_combo = Gtk.ComboBoxText()
+        for key, label in (
+            ("name_asc", "Name (A-Z)"),
+            ("name_desc", "Name (Z-A)"),
+            ("created_desc", "Created (newest first)"),
+            ("created_asc", "Created (oldest first)"),
+            ("changed_desc", "Modified (newest first)"),
+            ("changed_asc", "Modified (oldest first)"),
+        ):
+            self.sort_combo.append(key, label)
+        self.sort_combo.set_active_id("name_asc")
+        self.sort_combo.set_tooltip_text("Sort playlists")
+        self.sort_combo.get_cells()[0].set_property("ellipsize", Pango.EllipsizeMode.END)
+        self.sort_combo.connect("changed", self.on_sort_changed)
+        self.add(self.sort_combo)
+        self.playlist_sort = "name_asc"
 
         self.error_container = Gtk.Box()
         self.add(self.error_container)
@@ -223,6 +244,8 @@ class PlaylistList(Gtk.Box):
 
     def update(self, app_config: AppConfiguration | None = None, force: bool = False):
         if app_config:
+            self.playlist_sort = app_config.state.playlist_sort
+            self.sort_combo.set_active_id(self.playlist_sort)
             self.offline_mode = app_config.offline_mode
             self.new_playlist_button.set_sensitive(not app_config.offline_mode)
             self.list_refresh_button.set_sensitive(not app_config.offline_mode)
@@ -258,7 +281,8 @@ class PlaylistList(Gtk.Box):
 
         new_store = []
         selected_idx = None
-        for i, playlist in enumerate(playlists or []):
+        order, direction = self.playlist_sort.rsplit("_", 1)
+        for i, playlist in enumerate(sort_playlists(playlists or [], order, direction == "desc")):
             if (
                 app_config
                 and app_config.state
@@ -285,7 +309,12 @@ class PlaylistList(Gtk.Box):
         self.new_playlist_row.show()
 
     def on_list_refresh_click(self, _):
-        self.update(force=True)
+        self.emit("refresh-window", {}, True)
+
+    def on_sort_changed(self, combo: Gtk.ComboBoxText):
+        sort = combo.get_active_id()
+        if sort and sort != self.playlist_sort:
+            self.emit("refresh-window", {"playlist_sort": sort}, False)
 
     def new_entry_activate(self, entry: Gtk.Entry):
         self.create_playlist(entry.get_text())

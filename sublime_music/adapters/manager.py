@@ -19,6 +19,7 @@ from typing import (
     Callable,
     Dict,
     Generic,
+    Hashable,
     Iterable,
     List,
     Optional,
@@ -1780,10 +1781,6 @@ class AdapterManager:
         # This function actually does the search and calls the search_callback when each
         # of the futures completes. Returns whether or not it was cancelled.
         def do_search() -> bool:
-            # Sleep for a little while before returning the local results. They are less
-            # expensive to retrieve (but they still incur some overhead due to the GTK
-            # UI main loop queue).
-            sleep(0.3)
             if cancelled:
                 logging.info(f"Cancelled query {query} before caching adapter")
                 return True
@@ -1797,16 +1794,14 @@ class AdapterManager:
                 try:
                     logging.info(f"Returning caching adapter search results for '{query}'.")
                     search_result.update(AdapterManager._instance.caching_adapter.search(query))
-                    search_callback(search_result)
+                    if not cancelled:
+                        search_callback(search_result.snapshot())
                 except Exception:
                     logging.exception("Error on caching adapter search")
 
             if not AdapterManager._ground_truth_can_do("search"):
                 return False
 
-            # Wait longer to see if the user types anything else so we don't peg the
-            # server with tons of requests.
-            sleep(1 if AdapterManager._instance.ground_truth_adapter.is_networked else 0.3)
             if cancelled:
                 logging.info(f"Cancelled query {query} before server results")
                 return True
@@ -1816,9 +1811,11 @@ class AdapterManager:
                     query
                 )  # noqa: E501
                 search_result.update(ground_truth_search_results)
-                search_callback(search_result)
+                if not cancelled:
+                    search_callback(search_result.snapshot())
             except Exception:
-                logging.exception("Failed getting search results from server for query '{query}'")
+                logging.exception(f"Failed getting search results from server for query '{query}'")
+                return False
 
             if AdapterManager._instance.caching_adapter:
                 AdapterManager._instance.caching_adapter.ingest_new_data(
@@ -1857,6 +1854,48 @@ class AdapterManager:
             )
             for song_id in song_ids
         ]
+
+    @staticmethod
+    def any_album_song_downloaded(album_ids: Sequence[str]) -> Optional[bool]:
+        """
+        Whether any song of the given albums is downloaded (so playable offline), or
+        ``None`` if the caching adapter can't tell with a single lookup.
+        """
+        if not AdapterManager._instance:
+            return None
+        if not (caching_adapter := AdapterManager._instance.caching_adapter):
+            return False
+        try:
+            statuses = caching_adapter.get_album_cached_statuses(album_ids)
+        except NotImplementedError:
+            return None
+        except Exception:
+            logging.exception("Failed to get cached album song statuses")
+            return None
+        return any(
+            s in (SongCacheStatus.CACHED, SongCacheStatus.PERMANENTLY_CACHED)
+            for s in statuses.values()
+        )
+
+    @staticmethod
+    def cached_data_token() -> Optional[Hashable]:
+        """
+        A value which changes whenever cached data (other than cover art) or the set of
+        downloading songs changes, or ``None`` if that can't be known.
+        """
+        if not AdapterManager._instance:
+            return None
+        caching_adapter = AdapterManager._instance.caching_adapter
+        version = getattr(caching_adapter, "data_version", None) if caching_adapter else None
+        if version is None:
+            return None
+        try:
+            downloading = frozenset(
+                AdapterManager.current_download_ids - AdapterManager._cancelled_song_ids
+            )
+        except RuntimeError:
+            return None  # changed by a download thread while copying it
+        return (version, downloading)
 
     @staticmethod
     def clear_song_cache():

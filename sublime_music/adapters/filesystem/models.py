@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any, List, Optional, Union, cast
 
 from peewee import (
+    JOIN,
     AutoField,
     BooleanField,
     ForeignKeyAccessor,
@@ -147,15 +148,16 @@ class Album(BaseModel):
 
     @property
     def songs(self) -> List["Song"]:
-        albums = Album.select()
-        artists = Album.select()
+        # One query, with each song's album and artist joined in (prefetch took three).
+        songs = (
+            Song.select(Song, Album, Artist)
+            .join(Album, JOIN.LEFT_OUTER, on=(Song.album == Album.id))
+            .switch(Song)
+            .join(Artist, JOIN.LEFT_OUTER, on=(Song.artist == Artist.id))
+            .where(Song.album == self.id)
+        )
         return sorted(
-            prefetch(
-                # _songs is a backref from Song
-                self._songs,  # type: ignore
-                albums,
-                artists,
-            ),
+            songs,
             # Untagged tracks (no number) sort first; None can't be compared.
             key=lambda s: (s.disc_number or 1, s.track or 0),
         )

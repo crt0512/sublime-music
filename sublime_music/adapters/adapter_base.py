@@ -1101,6 +1101,15 @@ class CachingAdapter(Adapter):
             of the songs.
         """
 
+    def get_album_cached_statuses(self, album_ids: Sequence[str]) -> Dict[str, SongCacheStatus]:
+        """
+        Returns the cache statuses of the cached songs on the given albums, by song ID.
+        Optional: callers fall back to :class:`get_cached_statuses` for each album.
+
+        :raises NotImplementedError: if the adapter doesn't support this.
+        """
+        raise NotImplementedError()
+
     # Song Library
     def get_song_library(self, query: SongQuery) -> Sequence[LibrarySong]:
         """

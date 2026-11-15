@@ -222,7 +222,7 @@ class DBusManager:
         return {
             "org.mpris.MediaPlayer2": {
                 "CanQuit": True,
-                "CanRaise": True,
+                "CanRaise": config.mpris_allow_raise,
                 "HasTrackList": True,
                 "Identity": "Sublime Music",
                 "DesktopEntry": "sublime-music",

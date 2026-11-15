@@ -1,7 +1,7 @@
 from datetime import timedelta
 from functools import partial
 from random import randint
-from typing import List, Sequence, Tuple, cast
+from typing import List, Optional, Sequence, Tuple, cast
 
 import bleach
 from gi.repository import Gio, GLib, GObject, Gtk, Pango
@@ -32,6 +32,7 @@ class ArtistsPanel(Gtk.Paned):
         Gtk.Paned.__init__(self, orientation=Gtk.Orientation.HORIZONTAL)
 
         self._last_update_context = None
+        self._last_data_context = None
         self.artist_list = ArtistList()
         self.artist_list.connect(
             "refresh-window",
@@ -71,6 +72,25 @@ class ArtistsPanel(Gtk.Paned):
             # round-trip must not fetch artists or reload the unchanged detail panel.
             return
         self._last_update_context = context
+        current_song = state.current_song
+        data_context = (
+            context,
+            current_song.id if current_song else None,
+            state.artist_filter_text,
+            state.artist_sort,
+            AdapterManager.cached_data_token(),
+        )
+        if (
+            not force
+            and data_context[-1] is not None
+            and data_context == self._last_data_context
+            and not self.artist_list.error_container.get_children()
+            and not self.artist_detail_panel.error_container.get_children()
+        ):
+            # Nothing shown can have changed (e.g. this is just switching to the tab):
+            # reloading every album's songs made that slow. Errors are retried, though.
+            return
+        self._last_data_context = data_context
         self.artist_list.update(app_config=app_config, force=force)
         self.artist_detail_panel.update(app_config=app_config)
 
@@ -178,6 +198,7 @@ class ArtistList(Gtk.Box):
         self.pack_start(list_scroll_window, True, True, 0)
 
     _app_config = None
+    _shown_artists: List[Tuple[Optional[str], str, int]] = []
 
     @util.async_callback(
         AdapterManager.get_artists,
@@ -234,7 +255,12 @@ class ArtistList(Gtk.Box):
         else:
             artists.sort(key=name_key, reverse=sort == "name_desc")
 
-        util.diff_model_store(self.artists_store, [_ArtistModel(a) for a in artists])
+        # Creating (and comparing) a GObject per artist is slow for big libraries, so only
+        # do it when what's shown actually changed.
+        shown = [(a.id, a.name, a.album_count or 0) for a in artists]
+        if shown != self._shown_artists or len(self.artists_store) != len(shown):
+            self._shown_artists = shown
+            util.diff_model_store(self.artists_store, [_ArtistModel(a) for a in artists])
 
         selected_id = self._app_config.state.selected_artist_id if self._app_config else None
         selected_idx = next(
@@ -528,26 +554,7 @@ class ArtistDetailPanel(Gtk.Box):
         # (Dis|En)able the "Play All" and "Shuffle All" buttons. If in offline mode, it
         # depends on whether or not there are any cached songs.
         if self.offline_mode:
-            has_cached_song = False
-            playable_statuses = (
-                SongCacheStatus.CACHED,
-                SongCacheStatus.PERMANENTLY_CACHED,
-            )
-
-            for album in self.albums:
-                if album.id:
-                    try:
-                        songs = AdapterManager.get_album(album.id).result().songs or []
-                    except CacheMissError as e:
-                        if e.partial_data:
-                            songs = cast(API.Album, e.partial_data).songs or []
-                        else:
-                            songs = []
-                    statuses = AdapterManager.get_cached_statuses([s.id for s in songs])
-                    if any(s in playable_statuses for s in statuses):
-                        has_cached_song = True
-                        break
-
+            has_cached_song = self._any_song_downloaded()
             self.play_button.set_sensitive(has_cached_song)
             self.shuffle_button.set_sensitive(has_cached_song)
         else:
@@ -555,6 +562,22 @@ class ArtistDetailPanel(Gtk.Box):
             self.shuffle_button.set_sensitive(not self.offline_mode)
 
         self.albums_list.update(artist, app_config, force=force)
+
+    def _any_song_downloaded(self) -> bool:
+        album_ids = [album.id for album in self.albums if album.id]
+        if (downloaded := AdapterManager.any_album_song_downloaded(album_ids)) is not None:
+            return downloaded
+
+        playable_statuses = (SongCacheStatus.CACHED, SongCacheStatus.PERMANENTLY_CACHED)
+        for album_id in album_ids:
+            try:
+                songs = AdapterManager.get_album(album_id).result().songs or []
+            except CacheMissError as e:
+                songs = cast(API.Album, e.partial_data).songs or [] if e.partial_data else []
+            statuses = AdapterManager.get_cached_statuses([s.id for s in songs])
+            if any(s in playable_statuses for s in statuses):
+                return True
+        return False
 
     @util.async_callback(
         partial(AdapterManager.get_cover_art_uri, scheme="file"),

@@ -568,6 +568,8 @@ class AlbumsGrid(Gtk.Overlay):
     num_pages: Optional[int] = None
     next_page_fn = None
     provider_id: Optional[str] = None
+    _navigation_token: int = 0
+    _navigation_pending: bool = False
 
     def update_params(self, app_config: AppConfiguration) -> int:
         # If there's a diff, increase the ratchet.
@@ -688,6 +690,10 @@ class AlbumsGrid(Gtk.Overlay):
 
         force_grid_reload_from_master = False
         if app_config:
+            token = app_config.state.album_navigation_token
+            if token != self._navigation_token:
+                self._navigation_token = token
+                self._navigation_pending = True
             self.currently_selected_id = app_config.state.selected_album_id
             current_song = app_config.state.current_song
             self.current_song_id = current_song.id if current_song else None
@@ -749,6 +755,7 @@ class AlbumsGrid(Gtk.Overlay):
         # layout changes the adjustment, which checks again.
         if (
             self._changing_window
+            or self._scroll_tick_id is not None
             or self._pending_reflow is not None
             or self._hold is not None
             or len(self.list_store_top) == 0
@@ -1226,7 +1233,10 @@ class AlbumsGrid(Gtk.Overlay):
             self._scroll_tick_id = None
             return False  # closed again
 
-        if abs(adjustment.get_value() - self._scroll_last_value) > 1:
+        if (
+            self._scroll_start_time is not None
+            and abs(adjustment.get_value() - self._scroll_last_value) > 1
+        ):
             # Someone else (the user) scrolled in the meantime: leave them to it.
             self._scroll_tick_id = None
             return False
@@ -1237,7 +1247,10 @@ class AlbumsGrid(Gtk.Overlay):
 
         now = frame_clock.get_frame_time()
         if self._scroll_start_time is None:
+            # Start from wherever the layout left the view: replacing the albums shown
+            # can move it before then, which isn't the user scrolling.
             self._scroll_start_time = now
+            self._scroll_start_value = adjustment.get_value()
         settings = Gtk.Settings.get_default()
         animate = settings is None or settings.props.gtk_enable_animations
         elapsed = now - self._scroll_start_time
@@ -1462,11 +1475,20 @@ class AlbumsGrid(Gtk.Overlay):
                 return
             self.grid_top.select_child(to_select)
 
-            if self.currently_selected_index == selected_index:
+            details = self.detail_box_inner.get_children()
+            if (
+                not force_reload_from_master
+                and self.currently_selected_index == selected_index
+                and details
+                and details[0].album.id == self.currently_selected_id
+            ):
                 # A pending switch can be cancelled by clicking the original album.
                 # Its details still exist, but the pending reflow started closing them.
                 if not self.detail_box_revealer.get_reveal_child():
                     self.detail_box_revealer.set_reveal_child(True)
+                    self._navigation_pending = True
+                if self._navigation_pending:
+                    self._navigation_pending = False
                     self._scroll_to_detail()
                 return
 
@@ -1492,6 +1514,7 @@ class AlbumsGrid(Gtk.Overlay):
             self.detail_box_inner.pack_start(detail_element, True, True, 0)
             self.detail_box_inner.show_all()
             self.detail_box_revealer.set_reveal_child(True)
+            self._navigation_pending = False
             self._scroll_to_detail()
         else:
             self.grid_top.unselect_all()

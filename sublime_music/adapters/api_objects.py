@@ -4,8 +4,8 @@ Defines the objects that are returned by adapter methods.
 
 import abc
 import logging
-from datetime import datetime, timedelta
-from functools import lru_cache, partial
+from datetime import datetime, timedelta, timezone
+from functools import cached_property, lru_cache, partial
 from typing import (
     Any,
     Callable,
@@ -124,6 +124,28 @@ class Playlist(abc.ABC):
     cover_art: Optional[str]
 
 
+def sort_playlists(
+    playlists: Iterable[Playlist], order: str = "name", reverse: bool = False
+) -> List[Playlist]:
+    """Sort deterministically, keeping unknown dates last in either direction."""
+    if order not in ("name", "created", "changed"):
+        raise ValueError(f"Unknown playlist sort: {order}")
+    items = sorted(playlists, key=lambda p: (p.name.casefold(), p.id))
+    if order == "name":
+        return sorted(items, key=lambda p: p.name.casefold(), reverse=reverse)
+
+    def date_key(playlist: Playlist) -> float:
+        date = playlist.created if order == "created" else playlist.changed
+        assert date is not None
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=timezone.utc)
+        return date.timestamp()
+
+    dated = [p for p in items if (p.created if order == "created" else p.changed) is not None]
+    undated = [p for p in items if (p.created if order == "created" else p.changed) is None]
+    return sorted(dated, key=date_key, reverse=reverse) + undated
+
+
 class PlayQueue(abc.ABC):
     songs: Sequence[Song]
     position: timedelta
@@ -177,6 +199,7 @@ class SearchResult:
 
         member = f"_{result_type}"
         cast(Dict[str, Any], getattr(self, member)).update({r.id: r for r in results})
+        self.__dict__.pop(result_type, None)
 
     def update(self, other: "SearchResult"):
         assert self.query == other.query
@@ -184,6 +207,18 @@ class SearchResult:
         self._albums.update(other._albums)
         self._songs.update(other._songs)
         self._playlists.update(other._playlists)
+        for name in ("artists", "albums", "songs", "playlists"):
+            self.__dict__.pop(name, None)
+
+    def snapshot(self) -> "SearchResult":
+        """Rank an independent result on the search worker, not the GTK thread."""
+        result = SearchResult(self.query)
+        result.update(self)
+        result.artists
+        result.albums
+        result.songs
+        result.playlists
+        return result
 
     _S = TypeVar("_S")
 
@@ -220,7 +255,7 @@ class SearchResult:
         logging.debug(similarity_ratio.cache_info())
         return result
 
-    @property
+    @cached_property
     def artists(self) -> List[Artist]:
         return self._to_result(self._artists, lambda a: (a.name,))
 
@@ -231,14 +266,14 @@ class SearchResult:
         except Exception:
             return None
 
-    @property
+    @cached_property
     def albums(self) -> List[Album]:
         return self._to_result(self._albums, lambda a: (a.name, self._try_get_artist_name(a)))
 
-    @property
+    @cached_property
     def songs(self) -> List[Song]:
         return self._to_result(self._songs, lambda s: (s.title, self._try_get_artist_name(s)))
 
-    @property
+    @cached_property
     def playlists(self) -> List[Playlist]:
         return self._to_result(self._playlists, lambda p: (p.name,))

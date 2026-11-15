@@ -53,7 +53,7 @@ from .adapters import (
     SongCacheStatus,
     SongExportResult,
 )
-from .adapters.api_objects import Playlist, PlayQueue, Song
+from .adapters.api_objects import Playlist, PlayQueue, Song, sort_playlists
 from .config import AppConfiguration, ProviderConfiguration
 from .dbus import DBusManager, dbus_propagate
 from .desktop_media_keys import DesktopMediaKeys
@@ -605,16 +605,9 @@ class SublimeMusicApp(Gtk.Application):
 
             playlists = list(playlists_result.result())
 
-            sorters = {
-                "Alphabetical": lambda p: p.name,
-                "Created": lambda p: p.created,
-                "Modified": lambda p: p.changed,
-            }
-            if order in sorters:
-                playlists.sort(
-                    key=sorters.get(order, lambda p: p),
-                    reverse=reverse_order,
-                )
+            sort_order = {"Alphabetical": "name", "Created": "created", "Modified": "changed"}
+            if order in sort_order:
+                playlists = sort_playlists(playlists, sort_order[order], reverse_order)
 
             def make_playlist_tuple(p: Playlist) -> GLib.Variant:
                 cover_art_filename = AdapterManager.get_cover_art_uri(
@@ -639,7 +632,7 @@ class SublimeMusicApp(Gtk.Application):
 
         method_call_map: Dict[str, Dict[str, Any]] = {
             "org.mpris.MediaPlayer2": {
-                "Raise": self.window and self.window.present,
+                "Raise": self.on_mpris_raise,
                 "Quit": self.window and self.window.destroy,
             },
             "org.mpris.MediaPlayer2.Player": {
@@ -731,7 +724,7 @@ class SublimeMusicApp(Gtk.Application):
 
         for k, v in state_updates.items():
             setattr(self.app_config.state, k, v)
-        if state_updates.keys() & {"song_query", "song_columns"}:
+        if state_updates.keys() & {"song_query", "song_columns", "playlist_sort"}:
             # Preferences rather than transient state: keep them even if the app doesn't
             # get to shut down cleanly.
             self.app_config.save()
@@ -1024,7 +1017,12 @@ class SublimeMusicApp(Gtk.Application):
 
         self.app_config.state.current_tab = "albums"
         self.app_config.state.selected_album_id = album_id.get_string()
+        self.app_config.state.album_navigation_token += 1
         self.update_window()
+
+    def on_mpris_raise(self):
+        if self.app_config.mpris_allow_raise and self.window:
+            self.window.present()
 
     def on_go_to_artist(self, action: Any, artist_id: GLib.Variant):
         self.app_config.state.current_tab = "artists"
@@ -1059,7 +1057,10 @@ class SublimeMusicApp(Gtk.Application):
         self.update_window()
 
     def on_stack_change(self, stack: Gtk.Stack, _):
-        self.app_config.state.current_tab = stack.get_visible_child_name()
+        tab = stack.get_visible_child_name()
+        if self.app_config.state.current_tab == tab:
+            return
+        self.app_config.state.current_tab = tab
         self.update_window()
 
     def on_song_clicked(
@@ -1473,14 +1474,27 @@ class SublimeMusicApp(Gtk.Application):
 
         dialog.destroy()
 
+    _window_update_pending: bool = False
+    _window_update_force: bool = False
+
     def update_window(self, force: bool = False):
         if not self.window:
             return
-        logging.info(f"Updating window force={force}")
-        self.update_macos_media_session()
-        GLib.idle_add(
-            lambda: self.window.update(self.app_config, self.player_manager, force=force)
-        )
+        self._window_update_force |= force
+        if self._window_update_pending:
+            return
+        self._window_update_pending = True
+
+        def update() -> bool:
+            force = self._window_update_force
+            self._window_update_pending = False
+            self._window_update_force = False
+            if self.window:
+                self.update_macos_media_session()
+                self.window.update(self.app_config, self.player_manager, force=force)
+            return False
+
+        GLib.idle_add(update)
 
     def update_play_state_from_server(self, prompt_confirm: bool = False):
         # TODO (#129): need to make the play queue list loading for the duration here if

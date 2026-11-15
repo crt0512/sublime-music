@@ -1,3 +1,6 @@
+import logging
+from concurrent.futures import CancelledError
+from copy import deepcopy
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -71,6 +74,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_default_size(1342, 756)
         self._last_search_query: Optional[str] = None
         self._search_pending = False
+        self._search_timeout_id: Optional[int] = None
+        self.searches: Set[Result] = set()
+        self.connect("destroy", self._cancel_searches)
 
         # Create the stack
         self.albums_panel = albums.AlbumsPanel()
@@ -239,6 +245,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Main Settings
         self.notification_switch.set_active(app_config.song_play_notification)
+        self.mpris_raise_switch.set_active(app_config.mpris_allow_raise)
         self.confirm_queue_replacement_switch.set_active(app_config.confirm_queue_replacement)
         self.queue_replacement_warning_size_entry.set_value(
             app_config.queue_replacement_warning_size
@@ -256,8 +263,19 @@ class MainWindow(Gtk.ApplicationWindow):
         self.upnp_enabled_switch.set_active(app_config.upnp_enabled)
 
         # Player settings
-        for c in self.player_settings_box.get_children():
-            self.player_settings_box.remove(c)
+        player_options = player_manager.get_configuration_options()
+        player_settings = (
+            player_options,
+            app_config.player_config,
+            app_config.chromecast_enabled,
+            app_config.upnp_enabled,
+        )
+        if player_settings != getattr(self, "_player_settings", None):
+            self._player_settings = deepcopy(player_settings)
+            for c in self.player_settings_box.get_children():
+                self.player_settings_box.remove(c)
+        else:
+            player_options = {}
 
         def emit_player_settings_change(
             player_name: str, option_name: str, value_extraction_fn: Callable, *args
@@ -276,7 +294,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 False,
             )
 
-        for player_name, options in player_manager.get_configuration_options().items():
+        for player_name, options in player_options.items():
             if player_name == ChromecastPlayer.name and not app_config.chromecast_enabled:
                 continue
             if player_name == UPnPPlayer.name and not app_config.upnp_enabled:
@@ -557,7 +575,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.search_entry.connect("button-press-event", self._on_search_entry_button_press)
         self.search_entry.connect("focus-out-event", self._on_search_entry_loose_focus)
         self.search_entry.connect("changed", self._on_search_entry_changed)
-        self.search_entry.connect("search-changed", self._on_search_entry_changed)
         self.search_entry.connect("stop-search", self._on_search_entry_stop_search)
         header.pack_start(self.search_entry)
 
@@ -855,6 +872,10 @@ class MainWindow(Gtk.ApplicationWindow):
             "Enable Song Notifications", "song_play_notification"
         )
         vbox.add(notifications_box)
+        mpris_box, self.mpris_raise_switch = self._create_toggle_menu_button(
+            "Allow MPRIS to Focus the Window", "mpris_allow_raise"
+        )
+        vbox.add(mpris_box)
 
         # PLAY QUEUE SETTINGS
         # ==============================================================================
@@ -1134,7 +1155,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self._hide_search()
 
     search_idx = 0
-    searches: Set[Result] = set()
+
+    def _cancel_searches(self, *args):
+        self.search_idx += 1
+        if self._search_timeout_id is not None:
+            GLib.source_remove(self._search_timeout_id)
+            self._search_timeout_id = None
+        for search in self.searches:
+            search.cancel()
+        self.searches.clear()
 
     def _on_search_entry_changed(self, entry: Gtk.Entry):
         query = entry.get_text().strip()
@@ -1142,12 +1171,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
 
         self._last_search_query = query
-        self.search_idx += 1
-
-        while len(self.searches) > 0:
-            search = self.searches.pop()
-            if search:
-                search.cancel()
+        self._cancel_searches()
 
         if not self.search_popup.is_visible():
             self._show_search()
@@ -1160,34 +1184,44 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self._search_pending = True
         self._update_search_layout()
+        self._search_timeout_id = GLib.timeout_add(200, self._start_search, query, self.search_idx)
 
-        def search_result_calback(idx: int, result: API.SearchResult):
-            # Ignore slow returned searches.
-            if idx < self.search_idx:
-                return
+    def _start_search(self, query: str, idx: int) -> bool:
+        self._search_timeout_id = None
 
-            GLib.idle_add(self._update_search_results, result)
+        def apply_results(result: API.SearchResult) -> bool:
+            if idx == self.search_idx:
+                self._update_search_results(result)
+            return False
 
-        def search_result_done(idx: int, r: Result):
-            if r.result() is True:
-                # The search was cancelled
-                return
+        def search_result_callback(result: API.SearchResult):
+            GLib.idle_add(apply_results, result)
 
-            def done():
+        def search_result_done(r: Result):
+            try:
+                r.result()
+            except CancelledError:
+                pass
+            except Exception:
+                logging.exception("Search failed")
+
+            def done() -> bool:
+                self.searches.discard(r)
                 if idx == self.search_idx:
                     self._search_pending = False
-                # If all results are back, the stop the loading indicator.
-                self._set_search_loading(False)
+                    self._set_search_loading(False)
+                return False
 
             GLib.idle_add(done)
 
         search_result = AdapterManager.search(
             query,
-            search_callback=partial(search_result_calback, self.search_idx),
+            search_callback=search_result_callback,
             before_download=lambda: self._set_search_loading(True),
         )
-        search_result.add_done_callback(partial(search_result_done, self.search_idx))
         self.searches.add(search_result)
+        search_result.add_done_callback(search_result_done)
+        return False
 
     def _on_search_entry_stop_search(self, entry: Any):
         self.search_popup.popdown()

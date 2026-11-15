@@ -1,8 +1,12 @@
-Unreleased
-==========
+v0.14.4
+========
 
 **Features**
 
+* Playlists can be sorted by name, creation date, or modification date, in either
+  direction. The choice is saved per music provider.
+* MPRIS window focusing is now opt-in via "Allow MPRIS to Focus the Window" in
+  Settings, and is off by default. Media playback controls are unaffected.
 * The song lists on the Albums and Artists tabs show each song's rating next to its
   duration, if the music server supports ratings.
 * Right-clicking songs offers "Download song to...", which asks for a folder and saves
@@ -12,6 +16,25 @@ Unreleased
 
 **Bug Fixes**
 
+* Refreshing the playlist list also refreshes the selected playlist's contents and
+  marks other playlists' contents stale so they are fetched again when opened.
+* "Go to album" scrolls to an already-open album again and no longer reuses another
+  album's details at the same position after a query change. Automatic loading in
+  "All" mode waits until navigation scrolling finishes.
+* Window updates are coalesced, programmatic tab changes no longer queue duplicate
+  updates, and unchanged player settings no longer rebuild their widgets.
+* Search debounces typing before starting work instead of making workers sleep for
+  up to 1.3 seconds. Result ranking runs off the GTK thread and is cached; stale
+  queued results can no longer replace a newer query's results.
+* Searching the local cache no longer looks up each song's and album's artist with a
+  separate database query, which made every search take seconds with big libraries.
+* Switching to the Artists tab is faster: song cache statuses are read with a single
+  query, and the artist list is only rebuilt when the artists shown change. The
+  artist's albums are no longer reloaded at all unless cached data, downloads or the
+  current song changed, and an album's songs (and, offline, whether any of an artist's
+  songs are downloaded) are loaded with a single query.
+* "Go to album" no longer gives up scrolling to the album when replacing the albums
+  shown in "All" mode moves the view before the album is laid out.
 * Closing an album on the Albums tab animates again, instead of the albums below it
   jumping up at once. Closing no longer rebuilds all of the album tiles below it,
   which made the interface hang for a moment with many albums shown.

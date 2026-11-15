@@ -69,11 +69,13 @@ class UIState:
     # UI state
     current_tab: str = "albums"
     selected_album_id: Optional[str] = None
+    album_navigation_token: int = 0
     selected_artist_id: Optional[str] = None
     artist_filter_text: str = ""
     artist_sort: str = "name_asc"
     selected_browse_element_id: Optional[str] = None
     selected_playlist_id: Optional[str] = None
+    playlist_sort: str = "name_asc"
     album_sort_direction: str = "ascending"
     album_page_size: int = 30
     album_page: int = 0

@@ -154,6 +154,7 @@ class AppConfiguration(DataClassJsonMixin):
 
     # Global Settings
     song_play_notification: bool = True
+    mpris_allow_raise: bool = False
     offline_mode: bool = False
     allow_song_downloads: bool = True
     download_on_stream: bool = True  # also download when streaming a song

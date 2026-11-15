@@ -39,6 +39,8 @@ def library(monkeypatch):
     fetch = Mock(side_effect=lambda *a, **kw: Result(list(data)))
     monkeypatch.setattr(artists.AdapterManager, "_get_from_cache_or_ground_truth", fetch)
     monkeypatch.setattr(artists.AdapterManager, "_get_ignored_articles", lambda _: set())
+    # No cached data version, so every update reloads (unless a test says otherwise).
+    monkeypatch.setattr(artists.AdapterManager, "cached_data_token", lambda: None)
 
     def submit(fn, *args):
         future = Future()
@@ -308,3 +310,45 @@ def test_controls_changed_while_fetch_pending_are_applied_on_arrival(library, mo
     finally:
         _drain_events()
         widget.destroy()
+
+
+def test_panel_skips_reload_when_nothing_changed(
+    library: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    details = Mock()
+    monkeypatch.setattr(artists.ArtistDetailPanel, "update", details)
+    token: list = [(1, frozenset())]
+    monkeypatch.setattr(artists.AdapterManager, "cached_data_token", lambda: token[0])
+    panel = artists.ArtistsPanel()
+    try:
+        panel.update(library.config)
+        assert (library.fetch.call_count, details.call_count) == (1, 1)
+
+        # E.g. switching back to the tab.
+        panel.update(library.config)
+        assert (library.fetch.call_count, details.call_count) == (1, 1)
+
+        token[0] = (2, frozenset())
+        panel.update(library.config)
+        assert (library.fetch.call_count, details.call_count) == (2, 2)
+
+        monkeypatch.setattr(UIState, "current_song", SimpleNamespace(id="song"))
+        panel.update(library.config)
+        assert details.call_count == 3
+
+        panel.update(library.config, force=True)
+        assert details.call_count == 4
+
+        panel.artist_detail_panel.error_container.add(Gtk.Label())
+        panel.update(library.config)
+        assert details.call_count == 5
+
+        # Without a token there is no way of knowing, so it always reloads.
+        token[0] = None
+        panel.artist_detail_panel.error_container.foreach(lambda c: c.destroy())
+        panel.update(library.config)
+        panel.update(library.config)
+        assert details.call_count == 7
+    finally:
+        _drain_events()
+        panel.destroy()

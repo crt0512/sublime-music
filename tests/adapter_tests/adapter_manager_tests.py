@@ -1,8 +1,10 @@
 import hashlib
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import sleep
+from types import SimpleNamespace
 from typing import Any, Iterator, List, cast
 from unittest import mock
 
@@ -181,6 +183,47 @@ def test_get_song_details(adapter_manager: AdapterManager):
     pass
 
 
+def test_cached_data_token(adapter_manager: AdapterManager):
+    assert AdapterManager._instance and AdapterManager._instance.caching_adapter
+    caching_adapter = AdapterManager._instance.caching_adapter
+    token = AdapterManager.cached_data_token()
+    assert token is not None
+    assert AdapterManager.cached_data_token() == token
+
+    caching_adapter.ingest_new_data(
+        FilesystemAdapter.CachedDataKey.SONG,
+        "1",
+        SubsonicAPI.Song("1", "Song 1", album_id="a1", _album="foo"),
+    )
+    assert AdapterManager.cached_data_token() != token
+
+    token = AdapterManager.cached_data_token()
+    AdapterManager.current_download_ids.add("1")
+    try:
+        assert AdapterManager.cached_data_token() != token
+    finally:
+        AdapterManager.current_download_ids.discard("1")
+    assert AdapterManager.cached_data_token() == token
+
+
+def test_any_album_song_downloaded(adapter_manager: AdapterManager, tmp_path: Path):
+    assert AdapterManager._instance and AdapterManager._instance.caching_adapter
+    caching_adapter = AdapterManager._instance.caching_adapter
+    KEYS = FilesystemAdapter.CachedDataKey
+    caching_adapter.ingest_new_data(
+        KEYS.SONG,
+        "1",
+        SubsonicAPI.Song("1", "Song 1", album_id="a1", _album="foo", path="foo/1.mp3"),
+    )
+    assert AdapterManager.any_album_song_downloaded(["a1"]) is False
+
+    song_file = tmp_path / "song.mp3"
+    song_file.write_bytes(b"song")
+    caching_adapter.ingest_new_data(KEYS.SONG_FILE, "1", (None, song_file, None))
+    assert AdapterManager.any_album_song_downloaded(["a1"]) is True
+    assert AdapterManager.any_album_song_downloaded(["a2"]) is False
+
+
 def test_search_result_sort():
     search_results1 = SearchResult(query="foo")
     search_results1.add_results(
@@ -226,6 +269,75 @@ def test_search_result_update():
 
     search_results1.update(search_results2)
     assert [a.name for a in search_results1.artists] == ["foo", "another foo", "foo2"]
+
+
+def test_search_snapshots_rank_once_and_do_not_change(monkeypatch: pytest.MonkeyPatch):
+    result = SearchResult("foo")
+    result.add_results("artists", [SubsonicAPI.ArtistAndArtistInfo(id="1", name="foo")])
+    snapshot = result.snapshot()
+    result.add_results("artists", [SubsonicAPI.ArtistAndArtistInfo(id="2", name="foo two")])
+    monkeypatch.setattr(snapshot, "_to_result", mock.Mock(side_effect=AssertionError))
+    assert [a.id for a in snapshot.artists] == ["1"]
+    assert [a.id for a in result.artists] == ["1", "2"]
+    other = SearchResult("foo")
+    other.add_results("artists", [SubsonicAPI.ArtistAndArtistInfo(id="3", name="foo three")])
+    result.update(other)
+    assert [a.id for a in result.artists] == ["1", "2", "3"]
+
+
+@pytest.fixture
+def search_executor(monkeypatch: pytest.MonkeyPatch):
+    with ThreadPoolExecutor() as executor:
+        monkeypatch.setattr(AdapterManager, "executor", executor)
+        yield
+
+
+def test_search_does_not_sleep_or_rank_on_ui_thread(
+    search_executor: None, monkeypatch: pytest.MonkeyPatch
+):
+    main_thread = threading.get_ident()
+    result = SearchResult("foo")
+    result.add_results("artists", [SubsonicAPI.ArtistAndArtistInfo(id="1", name="foo")])
+    adapter = SimpleNamespace(search=lambda query: result, is_networked=True)
+    monkeypatch.setattr(
+        AdapterManager,
+        "_instance",
+        SimpleNamespace(ground_truth_adapter=adapter, caching_adapter=None),
+    )
+    monkeypatch.setattr(AdapterManager, "_can_use_cache", lambda *args: False)
+    monkeypatch.setattr(AdapterManager, "_ground_truth_can_do", lambda *args: True)
+    monkeypatch.setattr(
+        "sublime_music.adapters.manager.sleep",
+        mock.Mock(side_effect=AssertionError("Search must not sleep in the worker")),
+    )
+    snapshots: List[SearchResult] = []
+
+    def callback(snapshot: SearchResult):
+        assert threading.get_ident() != main_thread
+        assert all(
+            name in snapshot.__dict__ for name in ("songs", "albums", "artists", "playlists")
+        )
+        snapshots.append(snapshot)
+
+    assert AdapterManager.search("foo", callback).result() is False
+    assert [a.id for a in snapshots[0].artists] == ["1"]
+
+
+def test_server_search_failure_is_logged_without_ingesting_unbound_result(
+    search_executor: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    adapter = SimpleNamespace(search=mock.Mock(side_effect=RuntimeError("test search failure")))
+    cache = mock.Mock()
+    monkeypatch.setattr(
+        AdapterManager,
+        "_instance",
+        SimpleNamespace(ground_truth_adapter=adapter, caching_adapter=cache),
+    )
+    monkeypatch.setattr(AdapterManager, "_can_use_cache", lambda *args: False)
+    monkeypatch.setattr(AdapterManager, "_ground_truth_can_do", lambda *args: True)
+    assert AdapterManager.search("foo", mock.Mock()).result() is False
+    assert "test search failure" in caplog.text
+    cache.ingest_new_data.assert_not_called()
 
 
 def test_search(adapter_manager: AdapterManager):
